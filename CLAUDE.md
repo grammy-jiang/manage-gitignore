@@ -145,6 +145,10 @@ product, not a refactor.
 - the file is re-read and verified after writing (block intact, custom rules
   present, no ANSI or bidi characters) before success is reported
 - a `.gitignore` created or edited *during* the fetch is detected, not clobbered
+- a `.gitignore` that already carries an uncommitted change, staged or unstaged,
+  stops the run before the fetch and before the overwrite — a run may only commit
+  what that run wrote, and an unstaged edit is the one copy git cannot give back.
+  An untracked file is not a refusal: a first run is what this tool is for
 - `commit` refuses a file whose checksum no longer matches what was verified, and
   proves the committed blob is that content — not just that the path matched
 - a commit touching anything besides `.gitignore` is reported, never pushed
