@@ -8,6 +8,7 @@ and refuse to touch anything else.
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,33 @@ class TestSkillSource:
         source = cli.skill_source()
         assert (source / "SKILL.md").is_file()
         assert (source / "references").is_dir()
+
+    def test_the_skill_sits_beside_the_code(self):
+        """The checkout and site-packages must be the same tree.
+
+        Defect this pins: the skill used to live at the repository root and get
+        remapped into the package by a build-time `force-include`, so a path
+        under site-packages had no counterpart at the same relative position in
+        the checkout, and could not be traced back by relative path when
+        debugging. Keeping the directory beside this module removes the remap.
+        """
+        assert cli.skill_source().parent == Path(cli.__file__).resolve().parent
+
+    def test_nothing_remaps_the_skill_at_build_time(self):
+        """A remap would reintroduce the divergence the layout exists to avoid.
+
+        Asserted against the build configuration rather than the built wheel:
+        the wheel is what a remap would corrupt, but the setting is what a
+        future edit would add back. Parsed, not grepped -- the prose explaining
+        why the setting is absent names it, and a substring match cannot tell
+        that comment apart from the setting itself.
+        """
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.is_file():  # running against an installed package, not a checkout
+            pytest.skip("no checkout")
+        config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        targets = config["tool"]["hatch"]["build"]["targets"]
+        assert [name for name, t in targets.items() if "force-include" in t] == []
 
 
 class TestInstall:
