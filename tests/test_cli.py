@@ -76,6 +76,54 @@ class TestSkillSource:
         assert [name for name, t in targets.items() if "force-include" in t] == []
 
 
+class TestShippedTextIsPlain:
+    """No shipped file may carry terminal escape sequences.
+
+    Defect this pins: LICENSE was committed with 436 ESC bytes in it -- every
+    space written as `\\x1b[38;2;187;187;187m \\x1b[39m` by a shell that
+    colorized the text on its way to disk. In a terminal it looked like an
+    ordinary MIT licence, so nothing caught it: not review, not the linters,
+    not GitHub (which only reported the licence as "other"). It would have
+    shipped in the sdist and on the project page, permanently, for 0.1.0.
+
+    ESC only, deliberately. `.gitignore` carries two legitimate CR bytes in
+    `Icon\\r\\r` from gitignore.io's macOS template, which is why that file is
+    excluded from the whitespace hooks -- a rule that strips CR would corrupt
+    real template content.
+    """
+
+    @staticmethod
+    def _tracked() -> list[Path]:
+        import subprocess
+
+        repo = Path(__file__).resolve().parents[1]
+        if not (repo / ".git").exists():  # installed package, not a checkout
+            return []
+        listing = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z"],
+            capture_output=True,
+            check=True,
+        ).stdout
+        return [repo / name.decode() for name in listing.split(b"\0") if name]
+
+    def test_no_tracked_file_contains_an_escape_byte(self):
+        tracked = self._tracked()
+        if not tracked:
+            pytest.skip("no checkout")
+        guilty = [p.name for p in tracked if p.is_file() and b"\x1b" in p.read_bytes()]
+        assert guilty == []
+
+    def test_the_licence_is_the_licence_it_claims_to_be(self):
+        """`license = "MIT"` in pyproject.toml is metadata; this is the file it
+        describes. They are two separate strings and can drift apart."""
+        licence = Path(__file__).resolve().parents[1] / "LICENSE"
+        if not licence.is_file():
+            pytest.skip("no checkout")
+        text = licence.read_text(encoding="utf-8")
+        assert text.startswith("MIT License\n")
+        assert 'THE SOFTWARE IS PROVIDED "AS IS"' in text
+
+
 class TestLinkInspection:
     """`is_our_link` decides whether `uninstall` may delete something. Every
     answer it can give is worth pinning: a wrong `True` deletes a stranger's
