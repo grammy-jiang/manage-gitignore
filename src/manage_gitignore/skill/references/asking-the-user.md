@@ -5,7 +5,7 @@ AskUserQuestion allows at most **4 options per question**, and the free-text
 entries**. Use as many questions as that takes, up to three.
 
 | Situation | Questions |
-|---|---|
+| --- | --- |
 | `recommended` + `carried_over` fit in 3 | **one** — plus extras if there is room, "Other" as the 4th option |
 | they do not fit together | **two** — recommended + carried-over first, extras second, "Other" on the second |
 | `recommended` alone needs all 3 | **three** — recommended, then carried-over, then extras with "Other" |

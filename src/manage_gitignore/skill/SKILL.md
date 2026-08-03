@@ -244,7 +244,7 @@ python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.js
 *happened*, not what was asked for:
 
 | what happened | `--choice` | `--note` |
-|---|---|---|
+| --- | --- | --- |
 | committed and pushed | `commit + push` | — |
 | committed, no push (`permits_push: false`, `pushed: false`, skipped, or a failed push) | `commit only` | the plan's `guidance`, or the reported error |
 | commit refused, or the user said *Don't commit* | `not committed` | the error, when there was one |

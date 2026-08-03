@@ -11,7 +11,7 @@ every file at 90% coverage. A tag will not build if any of that fails.
 ## Layout
 
 | Path | Owns |
-|---|---|
+| --- | --- |
 | `src/manage_gitignore/skill/SKILL.md` | the agent-facing procedure |
 | `src/manage_gitignore/skill/scripts/templates.py` | the `.gitignore` file: scan → recommend → fetch → merge → write → verify |
 | `src/manage_gitignore/skill/scripts/gitwork.py` | git: status/diff, commit, push planning, push, facts |
