@@ -37,15 +37,15 @@ dev = ["pytest>=7.0", "ruff>=0.5", "mypy>=1.8"]
 manage-gitignore = "manage_gitignore.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# The skill lives at src/manage_gitignore/skill/ and ships as ordinary package
+# data. Deliberately no force-include: a build-time path remap would make an
+# installed file's path unresolvable against the checkout, so a traceback or a
+# path in site-packages could not be traced back here by relative position.
+# Repository layout and installed layout are the same tree.
 packages = ["src/manage_gitignore"]
 
-[tool.hatch.build.targets.wheel.force-include]
-# The skill ships inside the wheel so `install-skill` works from a plain
-# `pip install`, with no checkout present.
-"skill" = "manage_gitignore/skill"
-
 [tool.hatch.build.targets.sdist]
-include = ["src", "skill", "tests", "README.md", "LICENSE", "Makefile", "pyproject.toml"]
+include = ["src", "tests", "README.md", "LICENSE", "Makefile", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

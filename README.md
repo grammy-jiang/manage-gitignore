@@ -51,9 +51,15 @@ where a wrong answer is an exit code rather than a plausible sentence.
 | `src/manage_gitignore/summary.py` | the end-of-run summary format |
 | `src/manage_gitignore/shared.py` | one sanitiser, one no-follow reader, one JSON contract |
 | `src/manage_gitignore/cli.py` | the console script: dispatch, plus `install`/`uninstall` |
-| `skill/SKILL.md` | the agent-facing procedure |
-| `skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
+| `src/manage_gitignore/skill/SKILL.md` | the agent-facing procedure |
+| `src/manage_gitignore/skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
 | `tests/` | pytest suite |
+
+The skill ships **inside** the package rather than beside it, and nothing remaps
+it at build time. So `manage_gitignore/skill/SKILL.md` names the same file in
+this checkout and in `site-packages` — a path in a traceback, or the target of
+the installed symlink, resolves to the repository by relative position, with no
+layout translation to work out first.
 
 ## Development
 

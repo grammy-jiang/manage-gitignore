@@ -29,16 +29,15 @@ DEFAULT_SKILLS_DIR = Path.home() / ".claude" / "skills"
 def skill_source() -> Path:
     """The packaged skill directory: SKILL.md plus references/.
 
-    Shipped as package data beside this module; in a source checkout it sits at
-    the repository root instead, so both layouts work without a build step.
+    One path, not a search: the skill sits beside this module in the checkout
+    and in site-packages alike, because nothing remaps it at build time. A file
+    found under either root is therefore at the same path relative to the
+    package, which is what makes a path in a traceback traceable to the repo.
     """
-    packaged = Path(__file__).resolve().parent / "skill"
-    if (packaged / "SKILL.md").is_file():
-        return packaged
-    repo = Path(__file__).resolve().parents[2] / "skill"
-    if (repo / "SKILL.md").is_file():
-        return repo
-    raise FileNotFoundError("packaged skill files not found")
+    source = Path(__file__).resolve().parent / "skill"
+    if not (source / "SKILL.md").is_file():
+        raise FileNotFoundError(f"packaged skill files not found at {source}")
+    return source
 
 
 def link_target(link: Path) -> Path | None:
