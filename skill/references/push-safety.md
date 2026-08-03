@@ -24,6 +24,8 @@ separate decision and needs a separate answer.
    - `would_drop` — the commits a force-push removes from the remote.
    - `would_add` — your local commits that replace them.
    - `ahead` / `behind` — the counts.
+   - `remote_url` — **where this would land.** Name it; a force-push is approved
+     against a destination, not against a remote's nickname.
 
    If the plan's `suspicious_characters` is `true`, say so before printing: these
    subject lines carry control or text-reordering characters, so what the

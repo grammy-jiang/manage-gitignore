@@ -418,6 +418,27 @@ class TestCommit:
 
 
 # ── push planning ───────────────────────────────────────────────────────────
+class TestSafeMergeRef:
+    """branch.<name>.merge is repo config, and it builds a push refspec."""
+
+    def test_accepts_an_ordinary_branch_ref(self):
+        assert gw.safe_merge_ref("refs/heads/feature/foo") == "refs/heads/feature/foo"
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "refs/heads/evil:refs/heads/main",  # a second refspec smuggled in
+            "+refs/heads/main",  # a leading + forces the push
+            "--upload-pack=/bin/sh",  # an option, not a ref
+            "refs/tags/v1",  # not a branch
+            "main",  # unqualified
+        ],
+    )
+    def test_refuses_anything_that_is_not_a_plain_branch_ref(self, ref):
+        with pytest.raises(SystemExit):
+            gw.safe_merge_ref(ref)
+
+
 class TestSafeToken:
     def test_rejects_a_remote_that_looks_like_an_option(self):
         """A repo's own config can name a remote whatever it likes."""
@@ -528,6 +549,18 @@ class TestPushPlan:
         plan = gw.push_plan(str(repo))
         assert plan["action"] == "no-upstream"
         assert plan["remote"] == "origin"
+
+    def test_an_upstream_plan_names_where_a_push_would_land(self, remote_pair):
+        """A remote's nickname says nothing about the destination."""
+        work, bare = remote_pair
+        assert gw.push_plan(str(work))["remote_url"] == str(bare)
+
+    def test_an_upstream_plan_prefers_the_push_url(self, remote_pair, make_bare):
+        """git lets pushurl differ from url; the push follows pushurl."""
+        work, _ = remote_pair
+        elsewhere = make_bare("elsewhere")
+        git(work, "config", "remote.origin.pushurl", str(elsewhere))
+        assert gw.push_plan(str(work))["remote_url"] == str(elsewhere)
 
     def test_up_to_date(self, remote_pair):
         work, _ = remote_pair

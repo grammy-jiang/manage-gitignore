@@ -271,7 +271,11 @@ committing any other file, staged or not.
      written afterwards.
    - **Say the file is already written.** `.gitignore` has *already* been
      rewritten on disk, so **Don't commit** leaves the change uncommitted rather
-     than undoing it — `git checkout -- .gitignore` is what discards it.
+     than undoing it. What discards it depends on what was there before, so name
+     the right one — `status` already told you which:
+     `state: modified`/`staged` with a commit behind it → `git checkout -- .gitignore`;
+     `state: untracked` (the common first run) → `rm .gitignore`;
+     staged on a repo with no commits yet → `git reset -- .gitignore && rm .gitignore`.
      Otherwise "Don't commit" reads as "don't do it", and the file changed anyway.
    - **Name the push destination by asking `push-plan`**, not by re-deriving it:
 
@@ -285,7 +289,7 @@ committing any other file, staged or not.
 
      | `action` | what to say |
      |---|---|
-     | `fast-forward`, `stop-up-to-date` | it would go to `<remote>/<branch>` |
+     | `fast-forward`, `stop-up-to-date` | it would go to `<remote>/<branch>` — name the URL from `remote_url` |
      | `no-upstream` with a `remote` | first push; it would go to that remote — name its URL from `remote_urls`, as for the multi-remote case |
      | `no-upstream` with `remote: null` | several remotes and no `origin` — say the destination is not settled yet and a follow-up question will confirm it |
      | `diverged` | the remote already has commits this branch does not; a push would need a separate force-push decision (see [references/push-safety.md](references/push-safety.md)) |
@@ -301,8 +305,10 @@ committing any other file, staged or not.
      is signalled, and `push-plan` already accounts for it. Only a genuinely
      failed git invocation stops the run.
 
-     For a `no-upstream` plan the URLs come back in the same JSON, as
-     `remote_urls` — use them rather than shelling out. If the plan's
+     **Always name the destination URL, never just the remote name** — a name
+     says nothing about where the code goes. An upstream plan carries it as
+     `remote_url`; a `no-upstream` plan carries one per candidate in
+     `remote_urls`. Both come back in the same JSON; do not shell out for them. If the plan's
      `suspicious_characters` is `true`, say so: a remote or branch name carries
      characters that can misrepresent themselves on screen.
 
@@ -509,6 +515,13 @@ A worked example of the rendered output, and how to read it, is in
 
 ## Rules
 
+- This skill manages **gitignore.io templates**, plus whatever custom rules the
+  file already had. If the user asks for a literal pattern — "ignore `*.log`",
+  "add `build/`" — that is not a template name. Check `templates --list` in case
+  it is (`node`, `dotenv` and friends look like ordinary words); if it is not,
+  say plainly that this skill only adds catalogue templates and cannot append an
+  arbitrary line, and that doing so is an ordinary edit outside it. Never
+  approximate with a nearby template, and never hand-append the pattern.
 - Never hand-write `.gitignore`, and never edit, reorder, reformat, or hand-merge
   the template block or the custom rules — `manage-gitignore templates` owns both. If the API is
   unreachable, say so; do not fake it.

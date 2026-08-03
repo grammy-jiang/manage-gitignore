@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -275,6 +276,32 @@ def undo_hint(repo: str, ref: str = "HEAD") -> str:
     return f"`git reset --soft {ref}^` undoes it and restores the index"
 
 
+def remote_push_url(repo: str, name: str) -> str:
+    """Where `git push <name>` actually goes.
+
+    pushurl when set, else url: git lets them differ, and showing the fetch URL
+    would have the user approve a destination the push never reaches.
+    """
+    rc, pushurl, _ = git(repo, "config", "--get", f"remote.{name}.pushurl")
+    if rc == 0 and pushurl:
+        return pushurl
+    _, url, _ = git(repo, "config", "--get", f"remote.{name}.url")
+    return url
+
+
+def safe_merge_ref(ref: str) -> str:
+    """A branch ref from repo config, shape-checked before it builds a refspec.
+
+    merge_ref is interpolated into `HEAD:<ref>` and into a --force-with-lease
+    argument. A ':' or a leading '+' there would change what the push means, and
+    the value comes from branch.<name>.merge, which a checked-out repo controls.
+    """
+    refuse_option_like(ref, "upstream ref", die)
+    if not re.fullmatch(r"refs/heads/[^:\s+][^:\s]*", ref):
+        die(f"refusing upstream ref of unexpected shape: {ref!r}")
+    return ref
+
+
 def blob_matches_worktree(repo: str, ref: str) -> bool:
     """Does `ref`'s recorded TARGET have the same content as the working tree?
 
@@ -483,14 +510,7 @@ def push_plan(repo: str) -> PushPlan:
         remote = remotes[0] if len(remotes) == 1 else ("origin" if "origin" in remotes else None)
         # The PUSH url, which can differ from the fetch url: showing the fetch url
         # would have the user approve a destination the push never goes to.
-        urls: dict[str, str] = {}
-        for name in remotes:
-            rc_push, pushurl, _ = git(repo, "config", "--get", f"remote.{name}.pushurl")
-            if rc_push == 0 and pushurl:
-                urls[name] = pushurl
-                continue
-            _, url, _ = git(repo, "config", "--get", f"remote.{name}.url")
-            urls[name] = url
+        urls = {name: remote_push_url(repo, name) for name in remotes}
         return {
             "action": "no-upstream",
             "branch": branch,
@@ -513,6 +533,7 @@ def push_plan(repo: str) -> PushPlan:
     _, remote, _ = git(repo, "config", "--get", f"branch.{branch}.remote")
     _, merge_ref, _ = git(repo, "config", "--get", f"branch.{branch}.merge")
     _, upstream_sha, _ = git(repo, "rev-parse", "@{u}")
+    remote_url = remote_push_url(repo, remote)
     rc, counts, _ = git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
     if rc != 0 or "\t" not in counts:
         return {"action": "stop-compare-failed", "branch": branch}
@@ -523,7 +544,13 @@ def push_plan(repo: str) -> PushPlan:
         "merge_ref": merge_ref,
         # Computed for every action, not just the exotic ones: fast-forward is
         # the common push, and it names a destination too.
-        "suspicious_characters": has_suspicious_chars(" ".join([branch, remote, merge_ref])),
+        # Where a push would land, surfaced for every upstream action -- a
+        # fast-forward and a force-push both get confirmed against a real URL
+        # rather than a bare remote name.
+        "remote_url": remote_url,
+        "suspicious_characters": has_suspicious_chars(
+            " ".join([branch, remote, merge_ref, remote_url])
+        ),
         # The remote commit this comparison was made against. A force-push must
         # be leased against THIS sha -- the one whose consequences were shown to
         # the user -- not against whatever the remote holds by the time the push
@@ -607,7 +634,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             repo,
             "push",
             safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_ref(plan['merge_ref'])}",
+            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
             check=True,
         )
         sha = current_short_sha(repo)
@@ -691,9 +718,9 @@ def cmd_push(args: argparse.Namespace) -> int:
         git(
             repo,
             "push",
-            f"--force-with-lease={safe_ref(plan['merge_ref'])}:{safe_ref(args.expect_remote)}",
+            f"--force-with-lease={safe_merge_ref(plan['merge_ref'])}:{safe_ref(args.expect_remote)}",
             safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_ref(plan['merge_ref'])}",
+            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
             check=True,
         )
         sha = current_short_sha(repo)

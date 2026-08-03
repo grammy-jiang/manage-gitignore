@@ -292,7 +292,8 @@ class PushPlan(TypedDict, total=False):
     branch: str
     remote: str | None  # null on `no-upstream` when the caller must choose
     remotes: list[str]
-    remote_urls: dict[str, str]
+    remote_url: str  # upstream actions: where a push would land
+    remote_urls: dict[str, str]  # no-upstream: one per candidate remote
     merge_ref: str
     upstream_sha: str
     ahead: int
