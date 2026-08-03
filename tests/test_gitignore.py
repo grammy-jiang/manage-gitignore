@@ -16,7 +16,7 @@ import time
 import pytest
 
 import templates as gi
-from conftest import API, api_block
+from conftest import API, api_block, git, init_repo
 
 
 # ── response validation (fails closed) ──────────────────────────────────────
@@ -458,6 +458,131 @@ class TestSymlinkRefusal:
         (tmp_path / ".gitignore").symlink_to(secret)
         with pytest.raises(SystemExit):
             gi.read_text(str(tmp_path / ".gitignore"))
+
+
+# ── a change this run did not make ──────────────────────────────────────────
+HAND_WRITTEN = "# hand written\nmy-secret-dir/\n"
+
+
+@pytest.fixture
+def tracked_repo(tmp_path, api):
+    """A git repo whose .gitignore is committed and clean."""
+    root = init_repo(tmp_path / "tracked")
+    (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / ".gitignore").write_text(HAND_WRITTEN, encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "add a hand-written gitignore")
+    api.set_block(api_block(["git", "node"]))
+    return root
+
+
+class TestUncommittedGitignoreIsRefused:
+    """A run may only commit what that run wrote.
+
+    Defect this pins: with an uncommitted line already in .gitignore, the merge
+    carried it across as a custom rule and the commit shipped it as this run's
+    work -- the summary counted it among "custom rules kept" and never
+    distinguished it. An unstaged edit had a second failure on top: the
+    overwrite destroyed the only copy git did not have.
+    """
+
+    def write(self, run_script, root):
+        return run_script("gitignore.py", "--dir", str(root), "--force", "git", "node")
+
+    def test_an_unstaged_edit_stops_the_run(self, tracked_repo, run_script):
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+        assert "uncommitted changes (modified)" in out.stderr
+
+    def test_an_unstaged_edit_survives_the_refusal(self, tracked_repo, run_script):
+        """The whole point of refusing before the write: git has no copy of this."""
+        edited = HAND_WRITTEN + "notes.txt\n"
+        (tracked_repo / ".gitignore").write_text(edited, encoding="utf-8")
+        self.write(run_script, tracked_repo)
+        assert (tracked_repo / ".gitignore").read_text(encoding="utf-8") == edited
+
+    def test_a_staged_edit_stops_the_run(self, tracked_repo, run_script):
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "staged.txt\n", encoding="utf-8")
+        git(tracked_repo, "add", ".gitignore")
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+        assert "uncommitted changes (staged)" in out.stderr
+
+    def test_staged_and_unstaged_together_stops_the_run(self, tracked_repo, run_script):
+        """Porcelain "MM": dirty in the index and dirty again on top of it."""
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "one.txt\n", encoding="utf-8")
+        git(tracked_repo, "add", ".gitignore")
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "two.txt\n", encoding="utf-8")
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+
+    def test_a_staged_deletion_stops_the_run(self, tracked_repo, run_script):
+        """No file on disk, so the existence check alone would have missed it --
+        and writing one would silently undo the deletion."""
+        git(tracked_repo, "rm", "-q", "--cached", ".gitignore")
+        (tracked_repo / ".gitignore").unlink()
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+
+    def test_the_refusal_says_what_to_do_about_it(self, tracked_repo, run_script):
+        """It is the user's change; the remedy has to be theirs to run."""
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "x\n", encoding="utf-8")
+        err = self.write(run_script, tracked_repo).stderr
+        assert "git stash push -- .gitignore" in err
+        assert "Commit them" in err
+
+    def test_nothing_is_fetched_before_the_refusal(self, tracked_repo, run_script, api):
+        """It refuses ahead of the network, so a dirty repo costs no API call."""
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "x\n", encoding="utf-8")
+        self.write(run_script, tracked_repo)
+        assert api.invocations() == []
+
+    def test_a_clean_tracked_gitignore_is_written(self, tracked_repo, run_script):
+        """The refusal must not fire on the ordinary case."""
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == 0, out.stderr
+        assert "my-secret-dir/" in (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+
+    def test_an_untracked_gitignore_is_written(self, tmp_path, api, run_script):
+        """A first run over a hand-written file is what this skill is for: there
+        is no committed version for the result to be confused with."""
+        root = init_repo(tmp_path / "untracked-ignore")
+        (root / "package.json").write_text("{}", encoding="utf-8")
+        (root / ".gitignore").write_text(HAND_WRITTEN, encoding="utf-8")
+        api.set_block(api_block(["git", "node"]))
+        out = self.write(run_script, root)
+        assert out.returncode == 0, out.stderr
+        assert "my-secret-dir/" in (root / ".gitignore").read_text(encoding="utf-8")
+
+    def test_a_repo_with_no_gitignore_is_written(self, tmp_path, api, run_script):
+        root = init_repo(tmp_path / "no-ignore")
+        (root / "package.json").write_text("{}", encoding="utf-8")
+        api.set_block(api_block(["git", "node"]))
+        out = self.write(run_script, root)
+        assert out.returncode == 0, out.stderr
+
+    def test_outside_a_repo_there_is_nothing_to_check(self, cli_repo, run_script):
+        """No history, so the file on disk is the only copy either way."""
+        (cli_repo / ".gitignore").write_text(HAND_WRITTEN, encoding="utf-8")
+        out = self.write(run_script, cli_repo)
+        assert out.returncode == 0, out.stderr
+
+    def test_a_symlink_is_refused_on_its_own_terms(self, tracked_repo, run_script):
+        """Ordering: git reports this tracked file as changed, so without the
+        symlink check running first the user would be told to commit a symlink
+        rather than that a symlink is refused outright."""
+        secret = tracked_repo / "id_rsa"
+        secret.write_text("PRIVATE KEY\n", encoding="utf-8")
+        (tracked_repo / ".gitignore").unlink()
+        (tracked_repo / ".gitignore").symlink_to(secret)
+        out = self.write(run_script, tracked_repo)
+        assert out.returncode == gi.EXIT_ERROR
+        assert "symlink" in out.stderr
+
+    def test_the_check_is_a_no_op_outside_a_repo(self, tmp_path):
+        """Unit-level: the function itself, not the script around it."""
+        gi.refuse_uncommitted(str(tmp_path), str(tmp_path / ".gitignore"))
 
 
 # ── name validation ─────────────────────────────────────────────────────────

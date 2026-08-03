@@ -117,6 +117,13 @@ set exact, every custom rule present, no ANSI, bidi or zero-width characters.
   rejected names only*, quoting the near matches it printed (`"pythonn" not
   found — did you mean python?`), write a fresh `<templates.txt>`, and re-run.
   **Retry once.** If that fails, report the near matches and stop.
+- **exit 4, `.gitignore` already has uncommitted changes** — nothing was written,
+  and this is the user's call, not a retry. Relay the message, show them what is
+  already there (`git diff HEAD -- .gitignore`), and stop. They commit it, stash
+  it, or discard it; then the run starts again from Step 1. **Never work around
+  it** — not by committing their change for them, not by stashing on their
+  behalf. This run may only commit what this run wrote, and a staged or unstaged
+  edit sitting in that file is not that.
 - **anything else** — nothing usable was written. Report it and end the run: no
   Step 4, and no Step 5 summary for a run that produced no file.
 
@@ -128,7 +135,10 @@ rules**, so their absence certifies nothing about the rest of the diff.
 
 ## Step 4 — Review, commit, push (`.gitignore` ONLY)
 
-Never stage, commit, or suggest committing any other file.
+Never stage, commit, or suggest committing any other file — and never another
+change to this one. Step 3 refuses to start from a `.gitignore` that already
+carries an uncommitted edit, so everything the diff shows here is this run's
+work. That is what makes it honest to commit the whole file.
 
 ### 1. Show the diff
 
@@ -274,7 +284,9 @@ That output *is* the closing summary; do not hand-format a second one. Then
 - Never hand-write `.gitignore` or hand-edit the template block or custom rules.
   If the API is unreachable, say so; do not fake it.
 - Never run `git add`/`commit`/`push` directly.
-- This skill modifies and commits **only** `.gitignore`.
+- This skill modifies and commits **only** `.gitignore`, and within it only the
+  change this run made. If the file already carries an uncommitted edit, Step 3
+  stops; that edit is the user's to commit, stash, or discard.
 - Commit messages go through a file and `--message-file`. Never a heredoc or
   `-m "$(...)"` — some shells inject ANSI bytes into both, and those end up
   stored in the commit.

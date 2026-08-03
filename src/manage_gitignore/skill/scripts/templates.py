@@ -25,6 +25,12 @@ Usage:
 
 TEMPLATEs may be space- or comma-separated (e.g. "node,python vim").
 
+The write path refuses (exit 4) when .gitignore already carries an uncommitted
+change, staged or unstaged. Such a change would be merged in as a custom rule
+and land in this run's commit as if this run had made it, and an unstaged one
+would be destroyed by the overwrite. An untracked .gitignore is not a refusal:
+there is no committed version for the result to be confused with.
+
 Fetching uses curl (raw bytes; the template block is never edited), bounded by
 --max-time/--max-filesize and pinned to https end-to-end. The response is only
 accepted when its own "# Created by <API url>" header echoes exactly the
@@ -51,6 +57,7 @@ import time
 from io import BufferedReader
 from typing import NoReturn, TypedDict, cast
 
+from gitwork import file_state, is_repo
 from shared import (
     Facts,
     RecommendedTemplate,
@@ -133,6 +140,7 @@ SCAN_MAX_DEPTH = 3  # deep enough for src/app/settings.py, shallow enough to sta
 
 EXIT_ERROR = 1
 EXIT_UNKNOWN_TEMPLATE = 3  # the one recoverable failure: re-ask and retry
+EXIT_DIRTY_GITIGNORE = 4  # the file already holds changes this run did not make
 
 
 def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
@@ -555,6 +563,39 @@ def refuse_symlink(target: str) -> None:
         die(f"{target} is a symlink; refusing to read or replace it")
 
 
+def refuse_uncommitted(root: str, target: str) -> None:
+    """Refuse to overwrite a .gitignore that already holds someone else's change.
+
+    Two things go wrong when this run starts from a dirty file. The merge
+    absorbs whatever custom rules the file happens to hold, so an uncommitted
+    change is swept into this run's commit and reported as its work -- the
+    summary says "22 custom rules kept" and never distinguishes the one the user
+    added ten minutes ago. And an *unstaged* change is worse than mislabelled:
+    the overwrite destroys the only copy git does not have.
+
+    Both are prevented here rather than at commit time, because by commit time
+    the overwrite has already happened.
+
+    `untracked` is deliberately allowed. A first run over a hand-written file is
+    the case this skill exists for, there is no committed version for the result
+    to be confused with, and nothing in git is at risk. Outside a repository the
+    same reasoning applies with nothing to check.
+
+    The state comes from gitwork rather than being decided here, so "what state
+    is this file in" keeps one definition.
+    """
+    if not is_repo(root):
+        return
+    state = file_state(root)
+    if state in ("staged", "modified"):
+        die(
+            f"{target} has uncommitted changes ({state}), which this run would absorb "
+            "into its own commit and report as its own work.\n"
+            "  Commit them, or `git stash push -- .gitignore`, then re-run.",
+            EXIT_DIRTY_GITIGNORE,
+        )
+
+
 def atomic_write(target: str, data: bytes) -> None:
     """Replace target in one step, keeping its permissions.
 
@@ -656,6 +697,15 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
     # should not cost two API calls to discover.
     if not os.path.isdir(args.dir):
         die(f"target dir not found: {args.dir}")
+    # Symlink first: a symlinked .gitignore is refused on its own terms, and
+    # asking git about one would answer a question about its target instead.
+    refuse_symlink(target)
+    # Then the git state, before the fetch and before anything is overwritten. A
+    # run that starts from someone else's uncommitted edit cannot honestly report
+    # what it changed, and cannot give that edit back once it is gone. Checked
+    # even when no file is there: a .gitignore staged for deletion has none, and
+    # writing one would silently undo that deletion.
+    refuse_uncommitted(args.dir, target)
     validate(want)
 
     existed = os.path.lexists(target)
@@ -663,7 +713,6 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
     custom: list[str] = []
     before_digest = ""
     if existed:
-        refuse_symlink(target)
         if not args.force:
             die(f"{target} exists -- re-run with --force to overwrite")
         # One read: the digest and the parsed rules must describe the same bytes,
