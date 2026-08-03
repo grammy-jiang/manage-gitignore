@@ -29,11 +29,14 @@ verify: lint typecheck test
 build:
 	python3 -m build
 
+# PYTHONPATH=src rather than relying on an editable install: these targets then
+# work from a bare checkout, and they always link *this* working tree rather
+# than whatever happens to be installed.
 install:
-	python3 -m manage_gitignore.cli install
+	PYTHONPATH=src python3 -m manage_gitignore.cli install
 
 uninstall:
-	python3 -m manage_gitignore.cli uninstall
+	PYTHONPATH=src python3 -m manage_gitignore.cli uninstall
 
 clean:
 	rm -rf dist build .pytest_cache .mypy_cache .ruff_cache
