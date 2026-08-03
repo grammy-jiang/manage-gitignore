@@ -9,13 +9,13 @@ Color is ON when: stdout is a TTY, TERM != "dumb", and NO_COLOR is unset.
 Override with --color=always|never|auto (default auto) or FORCE_COLOR / NO_COLOR.
 
 Usage:
-  render_summary.py FACTS.json [--color auto|always|never]
-  render_summary.py --color always FACTS.json   # force color (e.g. to preview)
+  manage-gitignore summary FACTS.json [--color auto|always|never]
 
-This renderer is deliberately tolerant of malformed input: the facts file is
-normally written by gitignore.py and gitwork.py, but it is also a documented,
-hand-authorable format, so a wrong-typed or missing field degrades to a skipped
-row rather than a traceback.
+The facts file is written by `templates --facts-out` and `git facts`, both of
+which build it through the TypedDicts in shared.py. It is not hand-authored --
+SKILL.md says so explicitly -- so this renderer trusts the shape and does not
+carry coercion for values its own producers cannot emit. A malformed file is a
+bug worth surfacing, not one to paper over.
 
 FACTS schema (all fields optional; sections with no data are skipped):
 {
@@ -114,22 +114,6 @@ class Pal:
 # Every C0 control plus DEL, and TAB/LF/CR with them: a newline inside a
 # repo-derived value (a filename really can contain one) would otherwise let
 # that value forge extra rows in a summary the reader trusts as tool output.
-def as_list(value) -> list:
-    """A facts list, coerced. A bare string would otherwise iterate per character."""
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value] if value else []
-
-
-def as_dict(value) -> dict:
-    """A facts section, or an empty one when it is not an object.
-
-    A section written as a string or list would otherwise raise AttributeError on
-    the first .get(); skipping it prints a shorter summary instead of no summary.
-    """
-    return value if isinstance(value, dict) else {}
-
-
 def emit_section(
     lines: list[str], header: str, rows: Sequence[tuple[str, str | None]], pal: Pal
 ) -> None:
@@ -146,11 +130,6 @@ def emit_section(
 
 
 def names(items, pal: Pal, kind: str | None = None) -> str:
-    # Anything that is not a list would otherwise be iterated: a string joins
-    # character by character, a number raises. Coerce to a one-element list so a
-    # sloppy facts file degrades to readable output instead of garbage or a crash.
-    if not isinstance(items, (list, tuple)):
-        items = [items] if items else []
     if not items:
         return pal.dim("(none)")
     if kind == "add":
@@ -179,7 +158,6 @@ def color_diffstat(text, pal: Pal) -> str:
 # "recommended" continuation indent stays aligned with emit_section's column.
 TEMPLATE_LABELS = ("always-on", "recommended", "carried-over", "added", "removed")
 
-MAX_FACTS_BYTES = 2_000_000  # a real facts file is a few KB
 LABEL_INDENT = 2  # leading spaces before a label
 LABEL_GAP = 2  # spaces between the padded label and its value
 
@@ -200,10 +178,7 @@ def render(facts: Facts | dict, pal: Pal) -> str:
     lines.append(pal.rule("=" * len(title)))
 
     # NOTES (free-form context, e.g. a pre-run history reset)
-    raw_notes = facts.get("notes") or []
-    if not isinstance(raw_notes, (list, tuple)):
-        raw_notes = [raw_notes]
-    notes = [clean(n) for n in raw_notes if n]
+    notes = [clean(n) for n in facts.get("notes") or [] if n]
     if notes:
         lines.append("")
         lines.append(pal.hdr("NOTES"))
@@ -211,7 +186,7 @@ def render(facts: Facts | dict, pal: Pal) -> str:
             lines.append(f"  {pal.dim('•')} {note}")
 
     # SCAN
-    scan = as_dict(facts.get("scan"))
+    scan = facts.get("scan") or {}
     if scan:
         gi = scan.get("gitignore", "none")
         if gi == "existing":
@@ -235,21 +210,16 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         )
 
     # TEMPLATES
-    tpl = as_dict(facts.get("templates"))
+    tpl = facts.get("templates") or {}
     if tpl:
         rec = tpl.get("recommended") or []
-        if not isinstance(rec, (list, tuple)):
-            rec = [rec]
         rec_val = None
         if rec:
             parts = []
             for item in rec:
-                if isinstance(item, dict):
-                    reason = item.get("reason")
-                    name = clean(item.get("name", ""))
-                    parts.append(f"{name}  {pal.dim(f'← {clean(reason)}')}" if reason else name)
-                else:
-                    parts.append(clean(item))
+                reason = item.get("reason")
+                name = clean(item.get("name", ""))
+                parts.append(f"{name}  {pal.dim(f'← {clean(reason)}')}" if reason else name)
             indent = " " * value_column(TEMPLATE_LABELS)
             rec_val = f"\n{indent}".join(parts) if len(parts) > 1 else parts[0]
         # Say what removal costs: a template leaving the set means those paths
@@ -279,7 +249,7 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         )
 
     # MERGE
-    merge = as_dict(facts.get("merge"))
+    merge = facts.get("merge") or {}
     if merge:
         if merge.get("verbatim"):
             esc = merge.get("esc_bytes", 0)
@@ -288,16 +258,8 @@ def render(facts: Facts | dict, pal: Pal) -> str:
             )
         else:
             block = "merged with custom rules"
-        # custom_removed is a list of {line, covered_by}, but a caller may pass a
-        # plain count or a list of bare strings; render those rather than crash.
-        raw_removed = merge.get("custom_removed") or []
-        if isinstance(raw_removed, int):
-            removed_items, removed_count = [], raw_removed
-        else:
-            if isinstance(raw_removed, (str, dict)):
-                raw_removed = [raw_removed]
-            removed_items = [i if isinstance(i, dict) else {"line": str(i)} for i in raw_removed]
-            removed_count = len(removed_items)
+        removed_items = merge.get("custom_removed") or []
+        removed_count = len(removed_items)
         rows = [
             ("template block", block),
             ("custom rules", f"{clean(merge.get('custom_kept', 0))} kept, {removed_count} removed"),
@@ -309,13 +271,13 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         emit_section(lines, "MERGE", rows, pal)
 
     # REVIEW — scoped to the fetched template block, never the custom rules
-    review = as_dict(facts.get("review"))
+    review = facts.get("review") or {}
     if review:
         review_rows: list[tuple[str, str | None]] = []
-        review_rows += [("un-ignores", clean(x)) for x in as_list(review.get("negations"))]
+        review_rows += [("un-ignores", clean(x)) for x in review.get("negations") or []]
         review_rows += [
             ("very broad", f"{clean(x)}  {pal.dim('(may ignore more than intended)')}")
-            for x in as_list(review.get("broad"))
+            for x in review.get("broad") or []
         ]
         if not review_rows:
             # An empty section would read as "the whole file is fine". Say what
@@ -324,7 +286,7 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         emit_section(lines, "REVIEW — in the template block", review_rows, pal)
 
     # WRITE
-    write = as_dict(facts.get("write"))
+    write = facts.get("write") or {}
     if write:
         mode = write.get("mode", "new")
         if mode == "overwrite":
@@ -337,7 +299,7 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         emit_section(lines, "WRITE", [(clean(write.get("path", ".gitignore")), val)], pal)
 
     # COMMIT
-    commit = as_dict(facts.get("commit"))
+    commit = facts.get("commit") or {}
     if commit:
         # One default, used by both the row and the push gate below: two
         # fallbacks drifting apart produced a self-contradictory summary.
@@ -356,11 +318,9 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         # choice "not committed" reads as a failure rather than a non-event.
         if choice != "not committed":
             push = commit.get("push")
-            if isinstance(push, dict):
+            if push:
                 where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"
                 pushed = f"{pal.hashc(clean(push.get('sha', '')))} \u2192 {where}"
-            elif push:
-                pushed = clean(push)  # a hand-written facts file
             else:
                 pushed = pal.dim("not pushed")
                 if notes:
@@ -371,15 +331,15 @@ def render(facts: Facts | dict, pal: Pal) -> str:
         emit_section(lines, "COMMIT", rows, pal)
 
     # NET
-    net = as_dict(facts.get("net"))
+    net = facts.get("net") or {}
     if net:
-        tpl = as_dict(facts.get("templates"))  # read locally: no section ordering
+        tpl = facts.get("templates") or {}  # read locally: no section ordering
         rows = []
         if net.get("prev_count") is not None and net.get("new_count") is not None:
             # Built here from templates.added/removed rather than stored twice:
             # a second copy is a second thing that can disagree.
-            bits = [f"+{clean(t)}" for t in as_list(tpl.get("added"))]
-            bits += [f"-{clean(t)}" for t in as_list(tpl.get("removed"))]
+            bits = [f"+{clean(t)}" for t in tpl.get("added") or []]
+            bits += [f"-{clean(t)}" for t in tpl.get("removed") or []]
             delta = " ".join(bits)
             prev, new = clean(net["prev_count"]), clean(net["new_count"])
             rows.append(("templates", f"{prev} → {new}  {pal.dim(delta)}".rstrip()))
@@ -395,42 +355,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         allow_abbrev=False, description="Render manage-gitignore skill run summary."
     )
-    parser.add_argument("facts", nargs="?", help="path to JSON facts file (else stdin)")
+    parser.add_argument("facts", help="path to the JSON facts file")
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
     args = parser.parse_args()
 
-    # `is not None`, not truthiness: an empty --facts argument must be an error,
-    # not a silent switch to stdin that then blocks forever on a terminal.
     def _die(msg: str) -> NoReturn:
         print(f"render_summary: {msg}", file=sys.stderr)
         sys.exit(1)
 
-    if args.facts is not None:
-        # Same no-follow reader as everywhere else: a facts path is caller-
-        # supplied and can be a symlink or a FIFO.
-        try:
-            raw = read_bytes_or_die(args.facts, _die).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            _die(f"cannot read facts file: {exc}")
-    else:
-        if sys.stdin.isatty():
-            # Nothing is coming: a bare invocation on a terminal would otherwise
-            # sit reading forever, looking like a hang rather than a usage error.
-            print(
-                "render_summary: no FACTS path given and stdin is a terminal "
-                "(pass a file, or pipe JSON in)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        # Bounded like the network fetch: a piped blob is no more trustworthy
-        # than a downloaded one. Explicit UTF-8, not whatever the locale says.
-        try:
-            blob = sys.stdin.buffer.read(MAX_FACTS_BYTES + 1)
-            if len(blob) > MAX_FACTS_BYTES:
-                _die(f"facts on stdin exceeded {MAX_FACTS_BYTES} bytes")
-            raw = blob.decode("utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            _die(f"cannot read facts from stdin: {exc}")
+    # Same no-follow reader as everywhere else: a facts path is caller-supplied
+    # and can be a symlink or a FIFO.
+    try:
+        raw = read_bytes_or_die(args.facts, _die).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        _die(f"cannot read facts file: {exc}")
 
     try:
         facts = json.loads(raw)

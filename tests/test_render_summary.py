@@ -98,64 +98,19 @@ class TestFullRender:
         assert "manage-gitignore" in render({})
 
 
-# ── malformed input degrades, never crashes ─────────────────────────────────
-class TestMalformedInput:
-    @pytest.mark.parametrize(
-        ("section", "header"),
-        [
-            ("scan", "SCAN"),
-            ("templates", "TEMPLATES"),
-            ("merge", "MERGE"),
-            ("write", "WRITE"),
-            ("commit", "COMMIT"),
-            ("net", "NET"),
-        ],
-    )
-    def test_a_non_object_section_is_skipped_not_fatal(self, section, header):
-        """Regression: `.get()` on a string/list raised AttributeError.
+# ── the schema is trusted; a wrong *file* is still rejected ─────────────────
+class TestRejectsAWrongFile:
+    """Shape coercion was removed: templates/gitwork build facts through typed
+    dicts, and SKILL.md forbids hand-editing the file. What remains is the guard
+    against being handed something that is not a facts file at all."""
 
-        The documented behaviour is *skipped*, so assert the section is absent
-        rather than merely that nothing raised.
-        """
-        out = render({section: "oops"})
-        assert header not in out
-
-    def test_a_list_shaped_section_is_skipped(self):
-        assert "MERGE" not in render({"merge": [1, 2]})
-
-    def test_a_string_where_a_list_belongs_is_not_split_into_characters(self):
-        """Regression: "node" rendered as "n, o, d, e"."""
-        out = render({"scan": {"git_repo": True, "detected": "node"}})
-        assert "node" in out
-        assert "n, o, d, e" not in out
-
-    @pytest.mark.parametrize(
-        ("facts", "expected"),
-        [
-            ({"scan": {"git_repo": True, "detected": 42}}, "42"),
-            ({"templates": {"total": 1, "added": 7}}, "7"),
-            ({"write": {"path": ".gitignore", "mode": "overwrite", "reason": 99}}, "99"),
-            ({"commit": {"choice": "x", "scope": "y", "untouched": 4}}, "4"),
-            ({"net": {"prev_count": 1, "new_count": 2, "diffstat": 12}}, "12"),
-            ({"notes": "a single note, not a list"}, "a single note"),
-        ],
-        ids=["detected", "added", "reason", "untouched", "diffstat", "notes"],
-    )
-    def test_non_string_scalars_are_rendered_not_dropped(self, facts, expected):
-        """Regression: `"a " + value` raised TypeError on any non-str field."""
-        assert expected in render(facts)
-
-    @pytest.mark.parametrize(
-        "removed",
-        [3, "node_modules/", ["node_modules/"], [{"line": "a"}]],
-        ids=["count", "bare-string", "list-of-strings", "no-covered-by"],
-    )
-    def test_custom_removed_accepts_every_shape(self, removed):
-        out = render({"merge": {"verbatim": True, "custom_kept": 0, "custom_removed": removed}})
-        assert "MERGE" in out
-
-    def test_a_recommended_entry_that_is_not_a_dict_is_tolerated(self):
-        assert "node" in render({"templates": {"total": 1, "recommended": ["node"]}})
+    def test_a_json_array_is_rejected(self, tmp_path):
+        path = tmp_path / "f.json"
+        path.write_text("[]", encoding="utf-8")
+        out = run_cli(str(path))
+        assert out.returncode == 1
+        assert "must be a JSON object" in out.stderr
+        assert "Traceback" not in out.stderr
 
 
 # ── output cannot be forged ─────────────────────────────────────────────────
@@ -273,11 +228,6 @@ class TestPushRow:
     def test_not_pushed_alone_has_no_dangling_pointer(self):
         assert "see NOTES" not in render({"commit": {"choice": "commit only"}})
 
-    def test_a_bare_string_push_is_rendered_verbatim(self):
-        """A hand-written facts file predates the structured form."""
-        out = render({"commit": {"choice": "commit + push", "push": "abc1234 -> origin/main"}})
-        assert "abc1234 -> origin/main" in out
-
 
 class TestScanSection:
     def test_a_file_with_no_template_block_is_called_hand_written(self):
@@ -346,21 +296,11 @@ class TestCli:
         assert out.returncode == 0
         assert "COMMIT" in out.stdout
 
-    def test_reads_stdin_when_no_path_is_given(self):
-        out = run_cli("--color", "never", stdin=json.dumps(FULL_FACTS))
-        assert out.returncode == 0
-        assert "SCAN" in out.stdout
-
     def test_a_missing_file_is_reported_not_traced(self):
         out = run_cli("/no/such/facts.json")
         assert out.returncode == 1
         assert "cannot read" in out.stderr
         assert "Traceback" not in out.stderr
-
-    def test_an_empty_path_argument_is_an_error_not_a_stdin_hang(self):
-        """Regression: truthiness made "" fall through to a blocking stdin read."""
-        out = run_cli("", stdin="")
-        assert out.returncode == 1
 
     def test_invalid_json_is_reported(self, tmp_path):
         path = tmp_path / "f.json"
@@ -368,15 +308,6 @@ class TestCli:
         out = run_cli(str(path))
         assert out.returncode == 1
         assert "invalid JSON" in out.stderr
-
-    def test_a_json_array_is_rejected(self, tmp_path):
-        """Regression: a non-object crashed with a raw traceback."""
-        path = tmp_path / "f.json"
-        path.write_text("[]", encoding="utf-8")
-        out = run_cli(str(path))
-        assert out.returncode == 1
-        assert "must be a JSON object" in out.stderr
-        assert "Traceback" not in out.stderr
 
     def test_piped_output_carries_no_ansi(self, tmp_path):
         path = tmp_path / "f.json"

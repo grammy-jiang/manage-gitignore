@@ -53,9 +53,7 @@ manage-gitignore templates --list                       # all template names
 manage-gitignore templates --dir "<repo>" --recommend   # scan → proposed set (JSON)
 manage-gitignore templates --dir "<repo>" --detect      # what's in the current file
 manage-gitignore git --dir "<repo>" "<subcommand>"      # see below
-# subcommands: status, commit, push-plan, push, facts — plus `verify-commit
-# [--ref R]`, an optional manual re-check that a commit touched only .gitignore.
-# `commit` already does that itself; the flow below never needs it.
+# subcommands: status, commit, push-plan, push, facts
 ```
 
 **Any non-zero exit stops the run at that point** — report the error verbatim, and

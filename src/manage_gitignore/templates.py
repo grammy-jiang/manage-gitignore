@@ -560,129 +560,81 @@ def atomic_write(target: str, data: bytes) -> None:
     atomic_write_bytes(target, data, mode=preserved_mode(target))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(add_help=True, description=__doc__, allow_abbrev=False)
-    parser.add_argument("--dir", default=".", help="target repo root")
-    parser.add_argument("--force", action="store_true", help="overwrite existing")
-    parser.add_argument("--facts-out", metavar="PATH", help="write the run's summary facts as JSON")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--list", action="store_true", help="print all templates")
-    parser.add_argument(
-        "--count",
-        action="store_true",
-        help="with --list: print only how many templates the catalogue has",
-    )
-    mode.add_argument("--detect", action="store_true", help="report existing setup")
-    mode.add_argument(
-        "--recommend",
-        action="store_true",
-        help="scan the repo and print the proposed template set as JSON",
-    )
-    parser.add_argument(
-        "--templates-file",
-        metavar="PATH",
-        help="read template names from a file, one per line (never shell-parsed)",
-    )
-    parser.add_argument("templates", nargs="*")
-    args = parser.parse_args()
-
-    if args.count and not args.list:
-        # Checked unconditionally: outside a report mode this used to be ignored
-        # while the run went on to write a file the caller did not ask for.
-        die("--count only applies to --list")
-
-    report_mode = args.list or args.detect or args.recommend
-    # Report modes take no template names: silently ignoring them would look
-    # like a write that never happened.
-    if report_mode:
-        flag = "list" if args.list else "detect" if args.detect else "recommend"
-        if args.templates:
-            die(
-                f"--{flag} takes no template names (got: {' '.join(args.templates)}); "
-                "run it alone, then re-run to write"
-            )
-        if args.facts_out is not None:
-            die(f"--{flag} produces no run facts; drop --facts-out (nothing would be written)")
-        if args.force:
-            die(f"--{flag} writes nothing; drop --force (it would have no effect)")
-        if args.templates_file is not None:
-            die(f"--{flag} takes no templates; drop --templates-file")
-
-    if args.list:
-        # API-controlled text going straight to a terminal gets the same
-        # treatment as every other untrusted string in this tool.
-        catalogue = [n for n in fetch_text("list?format=lines").splitlines() if n.strip()]
-        if args.count:
-            # A number the caller can use directly. A failed fetch already died
-            # above, so this can never report 0 for "could not reach the API".
-            print(len(catalogue))
-            return
-        for name in catalogue:
-            print(clean(name))
+def cmd_list(args: argparse.Namespace) -> None:
+    """--list: print every template name, or just how many there are."""
+    # API-controlled text going straight to a terminal gets the same
+    # treatment as every other untrusted string in this tool.
+    catalogue = [n for n in fetch_text("list?format=lines").splitlines() if n.strip()]
+    if args.count:
+        # A number the caller can use directly. A failed fetch already died
+        # above, so this can never report 0 for "could not reach the API".
+        print(len(catalogue))
         return
+    for name in catalogue:
+        print(clean(name))
+    return
 
-    target = os.path.join(args.dir, ".gitignore")
-    if args.facts_out is not None and os.path.abspath(args.facts_out) == os.path.abspath(target):
-        die(
-            f"--facts-out must not be {target}: it would overwrite the very file "
-            "this run writes and verifies"
-        )
 
-    if args.recommend:
-        if not os.path.isdir(args.dir):
-            die(f"target dir not found: {args.dir}")
-        previous: list[str] = []
-        custom_count = 0
-        if os.path.lexists(target):
-            refuse_symlink(target)
-            raw_previous, existing_custom = split_existing(read_text(target))
-            previous = [clean(t) for t in raw_previous]
-            custom_count = count_patterns(existing_custom)
-        found = recommend(args.dir)
-        proposed = list(ALWAYS_ON)
-        proposed += [h["name"] for h in found if h["name"] not in proposed]
-        proposed += [t for t in previous if t not in proposed]
-        report: RecommendReport = {
-            "always_on": list(ALWAYS_ON),
-            "recommended": found,
-            "previous": previous,
-            # Computed by classify(), not left for the caller to derive:
-            # "previous, minus anything already always-on or recommended".
-            "carried_over": classify(proposed, {h["name"]: h["reason"] for h in found}, previous)[
-                "carried_over"
-            ],
-            "custom_lines": custom_count,
-            "proposed": proposed,
-        }
-        json.dump(report, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        return
-
-    if args.detect:
-        if not os.path.isdir(args.dir):
-            die(f"target dir not found: {args.dir}")
-        if not os.path.lexists(target):
-            print("gitignore: none")
-            return
+def cmd_recommend(args: argparse.Namespace, target: str) -> None:
+    """--recommend: scan the repo and print the proposed set as JSON."""
+    if not os.path.isdir(args.dir):
+        die(f"target dir not found: {args.dir}")
+    previous: list[str] = []
+    custom_count = 0
+    if os.path.lexists(target):
         refuse_symlink(target)
-        templates, detected_custom = split_existing(read_text(target))
-        meaningful = [line for line in detected_custom if line.strip()]
-        # Counted the same way as "custom pattern lines kept" below -- patterns
-        # only -- so the two numbers in a run summary are comparable.
-        pattern_count = count_patterns(meaningful)
-        # Every value below is repo-controlled: neutralise it like any other
-        # untrusted display text, and say so when something was there.
-        print(
-            "templates: "
-            + (",".join(clean(t) for t in templates) if templates else "(hand-written)")
-        )
-        print(f"custom_lines: {pattern_count}")
-        if any(has_suspicious_chars(line) for line in meaningful):
-            print("note: some lines contain control or text-reordering characters")
-        for line in meaningful:
-            print("  | " + clean(line))
-        return
+        raw_previous, existing_custom = split_existing(read_text(target))
+        previous = [clean(t) for t in raw_previous]
+        custom_count = count_patterns(existing_custom)
+    found = recommend(args.dir)
+    proposed = list(ALWAYS_ON)
+    proposed += [h["name"] for h in found if h["name"] not in proposed]
+    proposed += [t for t in previous if t not in proposed]
+    report: RecommendReport = {
+        "always_on": list(ALWAYS_ON),
+        "recommended": found,
+        "previous": previous,
+        # Computed by classify(), not left for the caller to derive:
+        # "previous, minus anything already always-on or recommended".
+        "carried_over": classify(proposed, {h["name"]: h["reason"] for h in found}, previous)[
+            "carried_over"
+        ],
+        "custom_lines": custom_count,
+        "proposed": proposed,
+    }
+    json.dump(report, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return
 
+
+def cmd_detect(args: argparse.Namespace, target: str) -> None:
+    """--detect: report the template block and custom rules already in place."""
+    if not os.path.isdir(args.dir):
+        die(f"target dir not found: {args.dir}")
+    if not os.path.lexists(target):
+        print("gitignore: none")
+        return
+    refuse_symlink(target)
+    templates, detected_custom = split_existing(read_text(target))
+    meaningful = [line for line in detected_custom if line.strip()]
+    # Counted the same way as "custom pattern lines kept" below -- patterns
+    # only -- so the two numbers in a run summary are comparable.
+    pattern_count = count_patterns(meaningful)
+    # Every value below is repo-controlled: neutralise it like any other
+    # untrusted display text, and say so when something was there.
+    print(
+        "templates: " + (",".join(clean(t) for t in templates) if templates else "(hand-written)")
+    )
+    print(f"custom_lines: {pattern_count}")
+    if any(has_suspicious_chars(line) for line in meaningful):
+        print("note: some lines contain control or text-reordering characters")
+    for line in meaningful:
+        print("  | " + clean(line))
+    return
+
+
+def cmd_write(args: argparse.Namespace, target: str) -> None:
+    """The write path: fetch, merge, de-duplicate, write, verify, record facts."""
     if args.templates_file is not None:
         if args.templates:
             die("--templates-file and positional template names are mutually exclusive")
@@ -823,6 +775,77 @@ def main() -> None:
             print(f"  {clean(line)}")
 
     print(f"Edit later: https://www.toptal.com/developers/gitignore?templates={joined}")
+
+
+def main() -> None:
+    """Parse arguments, then hand straight to the handler that owns the mode."""
+    parser = argparse.ArgumentParser(add_help=True, description=__doc__, allow_abbrev=False)
+    parser.add_argument("--dir", default=".", help="target repo root")
+    parser.add_argument("--force", action="store_true", help="overwrite existing")
+    parser.add_argument("--facts-out", metavar="PATH", help="write the run's summary facts as JSON")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--list", action="store_true", help="print all templates")
+    parser.add_argument(
+        "--count",
+        action="store_true",
+        help="with --list: print only how many templates the catalogue has",
+    )
+    mode.add_argument("--detect", action="store_true", help="report existing setup")
+    mode.add_argument(
+        "--recommend",
+        action="store_true",
+        help="scan the repo and print the proposed template set as JSON",
+    )
+    parser.add_argument(
+        "--templates-file",
+        metavar="PATH",
+        help="read template names from a file, one per line (never shell-parsed)",
+    )
+    parser.add_argument("templates", nargs="*")
+    args = parser.parse_args()
+
+    if args.count and not args.list:
+        # Checked unconditionally: outside a report mode this used to be ignored
+        # while the run went on to write a file the caller did not ask for.
+        die("--count only applies to --list")
+
+    report_mode = args.list or args.detect or args.recommend
+    # Report modes take no template names: silently ignoring them would look
+    # like a write that never happened.
+    if report_mode:
+        flag = "list" if args.list else "detect" if args.detect else "recommend"
+        if args.templates:
+            die(
+                f"--{flag} takes no template names (got: {' '.join(args.templates)}); "
+                "run it alone, then re-run to write"
+            )
+        if args.facts_out is not None:
+            die(f"--{flag} produces no run facts; drop --facts-out (nothing would be written)")
+        if args.force:
+            die(f"--{flag} writes nothing; drop --force (it would have no effect)")
+        if args.templates_file is not None:
+            die(f"--{flag} takes no templates; drop --templates-file")
+
+    if args.list:
+        cmd_list(args)
+        return
+
+    target = os.path.join(args.dir, ".gitignore")
+    if args.facts_out is not None and os.path.abspath(args.facts_out) == os.path.abspath(target):
+        die(
+            f"--facts-out must not be {target}: it would overwrite the very file "
+            "this run writes and verifies"
+        )
+
+    if args.recommend:
+        cmd_recommend(args, target)
+        return
+
+    if args.detect:
+        cmd_detect(args, target)
+        return
+
+    cmd_write(args, target)
 
 
 if __name__ == "__main__":

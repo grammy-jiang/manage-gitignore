@@ -13,7 +13,6 @@ the state and the single action that state permits. Asking the user, and passing
 Subcommands (all take --dir REPO, default "."):
   status         is it a repo, is .gitignore tracked/changed -- and print the diff
   commit         add + commit ONLY .gitignore from a message file, then verify
-  verify-commit  fail unless HEAD's commit touches .gitignore and nothing else
   push-plan      classify the push situation; emit the one permitted action
   push           execute exactly what push-plan permits (--confirm-force to force)
   facts          merge git-side facts into the JSON gitignore.py --facts-out wrote
@@ -301,29 +300,15 @@ def commit_scope() -> str:
     return f"{TARGET} only"
 
 
-def scope_violation(repo: str, files: list[str], ref: str = "HEAD") -> str | None:
+def scope_violation(repo: str, files: list[str]) -> str | None:
     """The message for a commit that touched more than TARGET, else None.
 
-    cmd_commit and verify-commit must not drift on what counts as wrong, or on
-    what they tell the user to do about it.
+    Only cmd_commit calls this; it stays a function because the message and the
+    undo hint belong together.
     """
     if files == [TARGET]:
         return None
-    return (
-        f"commit {ref} touches {files} -- expected only {TARGET}. "
-        f"Do NOT push; {undo_hint(repo, ref)}."
-    )
-
-
-def cmd_verify_commit(args: argparse.Namespace) -> int:
-    require_repo(args.dir)
-    files = commit_files(args.dir, args.ref)
-    problem = scope_violation(args.dir, files, args.ref)
-    emit({"ref": args.ref, "files": files, "only_gitignore": problem is None})
-    if problem:
-        print(f"gitwork: {problem}", file=sys.stderr)
-        return 2
-    return 0
+    return f"commit touches {files} -- expected only {TARGET}. Do NOT push; {undo_hint(repo)}."
 
 
 def load_facts(path: str) -> Facts:
@@ -433,7 +418,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
         # the commit that should not have happened.
         emit({"hash": sha, "files": files, "only_gitignore": False})
         print(f"gitwork: {problem}", file=sys.stderr)
-        return 2
+        return EXIT_BAD_COMMIT
     if staged_oid:
         # The file list is not the content: a hook (or a race) could commit
         # different bytes under the same path.
@@ -445,7 +430,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
                 f"this run wrote and verified. Do NOT push; {undo_hint(repo)}.",
                 file=sys.stderr,
             )
-            return 2
+            return EXIT_BAD_COMMIT
 
     _, raw_subject, _ = git(repo, "log", "-1", "--format=%s")
     subject = clean(raw_subject)
@@ -613,7 +598,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     if action.startswith("stop-"):
         emit({**plan, "pushed": False})
         print(f"gitwork: not pushing ({action})", file=sys.stderr)
-        return 0 if action == "stop-up-to-date" else 3
+        return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
 
     if action == "fast-forward":
         # Explicit refspec: under push.default=matching a bare `git push` would
@@ -646,7 +631,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 f"gitwork: several remotes ({names}){warn}; pass --remote to choose",
                 file=sys.stderr,
             )
-            return 5
+            return EXIT_REMOTE_CHOICE
         if remote not in plan["remotes"]:
             emit({**plan, "pushed": False, "error": "unknown-remote"})
             names = ", ".join(clean(r) for r in plan["remotes"])
@@ -654,7 +639,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 f"gitwork: unknown remote {clean(remote)!r} (have: {names})",
                 file=sys.stderr,
             )
-            return 5
+            return EXIT_REMOTE_CHOICE
         git(
             repo,
             "push",
@@ -677,7 +662,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "See references/push-safety.md.",
                 file=sys.stderr,
             )
-            return 4
+            return EXIT_NEEDS_FORCE
         # A bare --force-with-lease leases against the remote-tracking ref, which
         # push_plan just refreshed with `git fetch` -- so it would authorise
         # dropping commits that appeared AFTER the user saw the plan, which is
@@ -692,7 +677,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "nothing. See references/push-safety.md.",
                 file=sys.stderr,
             )
-            return 6
+            return EXIT_NEEDS_EXPECT
         if args.expect_remote != plan["upstream_sha"]:
             emit({**plan, "pushed": False, "error": "remote-moved"})
             print(
@@ -702,7 +687,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "are no longer the ones the user agreed to drop.",
                 file=sys.stderr,
             )
-            return 4
+            return EXIT_NEEDS_FORCE
         git(
             repo,
             "push",
@@ -825,9 +810,6 @@ def main() -> int:
     p.add_argument("--message-file", required=True)
     p.add_argument("--facts", help="also record the commit block into this facts JSON")
 
-    p = subcommand("verify-commit", help=f"fail unless a commit touches only {TARGET}")
-    p.add_argument("--ref", default="HEAD")
-
     subcommand("push-plan", help="classify the push situation")
 
     p = subcommand("push", help="execute exactly what push-plan permits")
@@ -861,7 +843,6 @@ def main() -> int:
     handlers = {
         "status": cmd_status,
         "commit": cmd_commit,
-        "verify-commit": cmd_verify_commit,
         "push-plan": cmd_push_plan,
         "push": cmd_push,
         "facts": cmd_facts,

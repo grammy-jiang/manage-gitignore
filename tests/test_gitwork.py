@@ -417,25 +417,6 @@ class TestCommit:
         assert out.returncode == 0, out.stderr
 
 
-class TestVerifyCommit:
-    def test_passes_for_a_gitignore_only_commit(self, repo, run_script, tmp_path):
-        write_gitignore(repo)
-        run_script(
-            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
-        )
-        out = run_script("gitwork.py", "--dir", str(repo), "verify-commit")
-        assert out.returncode == 0
-        assert json.loads(out.stdout)["only_gitignore"] is True
-
-    def test_fails_for_a_commit_touching_anything_else(self, repo, run_script):
-        (repo / "other.txt").write_text("x\n", encoding="utf-8")
-        git(repo, "add", "-A")
-        git(repo, "commit", "-qm", "mixed")
-        out = run_script("gitwork.py", "--dir", str(repo), "verify-commit")
-        assert out.returncode == 2
-        assert json.loads(out.stdout)["only_gitignore"] is False
-
-
 # ── push planning ───────────────────────────────────────────────────────────
 class TestSafeToken:
     def test_rejects_a_remote_that_looks_like_an_option(self):
@@ -1083,17 +1064,6 @@ class TestCli:
         out = run_script("gitwork.py", "--dir", "/no/such/dir", "status")
         assert out.returncode == 1
         assert "directory not found" in out.stderr
-
-    def test_a_ref_that_looks_like_a_flag_is_refused(self, repo, run_script, tmp_path):
-        out = run_script(
-            "gitwork.py",
-            "--dir",
-            str(repo),
-            "verify-commit",
-            f"--ref=--output={tmp_path / 'pwn'}",
-        )
-        assert out.returncode == 1
-        assert not (tmp_path / "pwn").exists()
 
     def test_commit_on_a_non_repo_is_refused(self, plain_dir, run_script, tmp_path):
         out = run_script(
