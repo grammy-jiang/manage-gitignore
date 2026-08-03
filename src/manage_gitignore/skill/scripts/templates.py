@@ -25,11 +25,27 @@ Usage:
 
 TEMPLATEs may be space- or comma-separated (e.g. "node,python vim").
 
-The write path refuses (exit 4) when .gitignore already carries an uncommitted
-change, staged or unstaged. Such a change would be merged in as a custom rule
-and land in this run's commit as if this run had made it, and an unstaged one
-would be destroyed by the overwrite. An untracked .gitignore is not a refusal:
-there is no committed version for the result to be confused with.
+When .gitignore already carries an uncommitted change, the rebuild is based on
+the COMMITTED file rather than on what is on disk. That is the only base for
+which "the changes this run made" describes the resulting commit truthfully.
+The user's own edit is not discarded: it is re-applied on top afterwards, and
+put back staged or unstaged exactly as it was found, so `git status` reads the
+same before and after. The work tree therefore holds MORE than will be
+committed, and gitwork.py's `commit` is told both versions through the facts
+file rather than taking whatever is on disk.
+
+Re-applying is done at the level of the custom rules, not as a text merge of two
+files that barely resemble each other -- the two regions have different owners.
+This run rewrites the template block wholesale; the user owns everything outside
+it. A whole-file three-way merge conflicts on a deletion, because every line it
+would need as context was rewritten; a rule-level one does not. The one edit
+that cannot be carried across is an edit *inside* the block, which is
+regenerated from the API; that is reported, never silently swallowed.
+
+An untracked .gitignore is not treated as pending at all: there is no committed
+version for the result to be confused with, so the whole file is honestly this
+run's own work. A .gitignore staged for deletion is refused (exit 4) -- there is
+no rebuild that honours "this file should be gone".
 
 Fetching uses curl (raw bytes; the template block is never edited), bounded by
 --max-time/--max-filesize and pinned to https end-to-end. The response is only
@@ -57,7 +73,7 @@ import time
 from io import BufferedReader
 from typing import NoReturn, TypedDict, cast
 
-from gitwork import file_state, is_repo
+from gitwork import file_state, is_repo, version_at
 from shared import (
     Facts,
     RecommendedTemplate,
@@ -136,6 +152,27 @@ DETECT_RULES: tuple[DetectRule, ...] = (
 )
 
 SCAN_MAX_DEPTH = 3  # deep enough for src/app/settings.py, shallow enough to stay cheap
+
+
+class PendingVersions(TypedDict):
+    """The versions of .gitignore in play when it carries an uncommitted change.
+
+    `index` is None when nothing is staged for it, `work` when the file is not
+    on disk (staged for deletion).
+    """
+
+    state: str
+    head: str
+    index: str | None
+    work: str | None
+
+
+class CarriedReport(TypedDict):
+    """What the user's own uncommitted edit turned out to be."""
+
+    added: list[str]
+    removed: list[str]
+    block_edited: bool
 
 
 EXIT_ERROR = 1
@@ -424,12 +461,22 @@ def verify_written(target: str, want: list[str], kept: list[str]) -> tuple[list[
     used to ask a human to eyeball in the diff: markers present, template set
     exact, every preserved custom rule still there, no ANSI corruption.
     """
-    problems: list[str] = []
     raw = read_bytes(target)  # no-follow: a symlink swapped in post-write is fatal
+    return verify_bytes(raw, want, kept, target), raw
+
+
+def verify_bytes(raw: bytes, want: list[str], kept: list[str], what: str) -> list[str]:
+    """The checks themselves, on bytes rather than a path.
+
+    Split out because two different versions have to pass them: the one on disk,
+    and the one about to be committed, which are no longer the same file once an
+    uncommitted change is being carried across.
+    """
+    problems: list[str] = []
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return [f"{target} is not valid UTF-8 after writing: {exc}"], raw
+        return [f"{what} is not valid UTF-8 after writing: {exc}"]
 
     esc = count_esc(raw)
     if esc:
@@ -455,13 +502,15 @@ def verify_written(target: str, want: list[str], kept: list[str]) -> tuple[list[
     for line in kept:
         if line.strip() and line.strip() not in present:
             problems.append(f"custom rule lost during write: {line.strip()}")
-    return problems, raw
+    return problems
 
 
-def split_existing(text: str) -> tuple[list[str], list[str]]:
-    """Return (templates, custom_lines) parsed from an existing .gitignore.
+def split_regions(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Return (templates, block_lines, custom_lines) for an existing .gitignore.
 
-    templates is [] when no API block is present (whole file is custom).
+    The two regions this file is made of, and the only place that split is
+    decided. templates and block_lines are empty when there is no API block --
+    a hand-written file is custom from top to bottom.
     """
     lines = text.splitlines()
     start = end = None
@@ -475,8 +524,53 @@ def split_existing(text: str) -> tuple[list[str], list[str]]:
             end = i
             break
     if start is None or end is None:
-        return [], lines
-    return templates, lines[:start] + lines[end + 1 :]
+        return [], [], lines
+    return templates, lines[start : end + 1], lines[:start] + lines[end + 1 :]
+
+
+def split_existing(text: str) -> tuple[list[str], list[str]]:
+    """(templates, custom_lines) -- the two regions callers usually want."""
+    templates, _, custom = split_regions(text)
+    return templates, custom
+
+
+def reapply_custom(
+    kept: list[str], base_custom: list[str], their_custom: list[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """Re-apply an edit made to the custom rules on top of this run's own result.
+
+    The file has two owners. This run owns the template block, and rewrites it
+    wholesale; the user owns the custom rules. Because those regions are
+    disjoint, an uncommitted edit can be carried across as *its own change* --
+    the difference between the committed custom rules and the user's -- rather
+    than as a text merge of two files that barely resemble each other. A plain
+    three-way merge of the whole file conflicts on a deletion, because the
+    surrounding lines it needs as context were all rewritten. This does not.
+
+    kept        the custom rules this run committed (deduplicated)
+    base_custom the custom rules as committed, before the user touched them
+    their_custom the custom rules in the user's version
+
+    Returns (result, added, removed).
+    """
+    ops = difflib.SequenceMatcher(a=base_custom, b=their_custom, autojunk=False).get_opcodes()
+    removed: list[str] = []
+    added: list[str] = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag in ("delete", "replace"):
+            removed.extend(base_custom[i1:i2])
+        if tag in ("insert", "replace"):
+            added.extend(their_custom[j1:j2])
+
+    result = list(kept)
+    for line in removed:
+        if line in result:  # already dropped as a duplicate is not an error
+            result.remove(line)
+    # Appended rather than placed: the positions in `kept` no longer mean what
+    # they meant in `base_custom` once duplicates have been dropped, and a rule
+    # appended to the end of a .gitignore behaves the same as one in the middle.
+    result.extend(added)
+    return result, added, removed
 
 
 def dedup_custom(custom: list[str], api_text: str) -> tuple[list[str], list[tuple[str, str]]]:
@@ -563,37 +657,45 @@ def refuse_symlink(target: str) -> None:
         die(f"{target} is a symlink; refusing to read or replace it")
 
 
-def refuse_uncommitted(root: str, target: str) -> None:
-    """Refuse to overwrite a .gitignore that already holds someone else's change.
+def capture_pending(root: str, work: str | None) -> PendingVersions | None:
+    """The versions of .gitignore that exist when it has an uncommitted change.
 
-    Two things go wrong when this run starts from a dirty file. The merge
-    absorbs whatever custom rules the file happens to hold, so an uncommitted
-    change is swept into this run's commit and reported as its work -- the
-    summary says "22 custom rules kept" and never distinguishes the one the user
-    added ten minutes ago. And an *unstaged* change is worse than mislabelled:
-    the overwrite destroys the only copy git does not have.
+    None when there is nothing to preserve: not a repo, a clean file, or a file
+    that is not in HEAD at all (untracked, or added and never committed). In
+    that last case a first run is exactly what this tool is for -- there is no
+    committed version for the result to be confused with, so the whole file is
+    honestly this run's own work.
 
-    Both are prevented here rather than at commit time, because by commit time
-    the overwrite has already happened.
+    Otherwise the run must keep three things apart, and git already stores all
+    three: what is committed, what is staged, and what is on disk. The rebuild
+    starts from the committed one, because that is the only base for which "the
+    changes this run made" is a truthful description of the resulting commit.
+    The other two come back afterwards as the user's own uncommitted work.
 
-    `untracked` is deliberately allowed. A first run over a hand-written file is
-    the case this skill exists for, there is no committed version for the result
-    to be confused with, and nothing in git is at risk. Outside a repository the
-    same reasoning applies with nothing to check.
-
-    The state comes from gitwork rather than being decided here, so "what state
-    is this file in" keeps one definition.
+    `work` is passed in rather than re-read: the caller already has those bytes,
+    and reading the file twice would leave a window for it to change in between.
     """
     if not is_repo(root):
-        return
+        return None
     state = file_state(root)
-    if state in ("staged", "modified"):
+    if state not in ("staged", "modified"):
+        return None
+    head = version_at(root, "HEAD")
+    if head is None:
+        return None
+    index = version_at(root, "")
+    if index is None:
+        # Staged for deletion: the user's pending change is "this file should be
+        # gone". There is no version of "rebuild the templates" that honours
+        # that, and quietly writing a fresh file would undo it without saying so.
         die(
-            f"{target} has uncommitted changes ({state}), which this run would absorb "
-            "into its own commit and report as its own work.\n"
-            "  Commit them, or `git stash push -- .gitignore`, then re-run.",
+            ".gitignore is staged for deletion. This run would recreate it, "
+            "silently undoing that.\n"
+            "  Finish the deletion (commit it) or unstage it "
+            "(`git restore --staged .gitignore`), then re-run.",
             EXIT_DIRTY_GITIGNORE,
         )
+    return {"state": state, "head": head, "index": index, "work": work}
 
 
 def atomic_write(target: str, data: bytes) -> None:
@@ -697,20 +799,13 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
     # should not cost two API calls to discover.
     if not os.path.isdir(args.dir):
         die(f"target dir not found: {args.dir}")
-    # Symlink first: a symlinked .gitignore is refused on its own terms, and
-    # asking git about one would answer a question about its target instead.
+    # A symlinked .gitignore is refused on its own terms, before anything asks
+    # git about it -- git would be answering about the target.
     refuse_symlink(target)
-    # Then the git state, before the fetch and before anything is overwritten. A
-    # run that starts from someone else's uncommitted edit cannot honestly report
-    # what it changed, and cannot give that edit back once it is gone. Checked
-    # even when no file is there: a .gitignore staged for deletion has none, and
-    # writing one would silently undo that deletion.
-    refuse_uncommitted(args.dir, target)
     validate(want)
 
     existed = os.path.lexists(target)
-    prev_templates: list[str] = []
-    custom: list[str] = []
+    work_text: str | None = None
     before_digest = ""
     if existed:
         if not args.force:
@@ -720,7 +815,16 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
         # file than the custom rules came from.
         before_bytes = read_bytes(target)
         before_digest = hashlib.sha256(before_bytes).hexdigest()
-        prev_templates, custom = split_existing(decode_utf8(before_bytes, target))
+        work_text = decode_utf8(before_bytes, target)
+
+    # The rebuild is based on what is COMMITTED, not on what is on disk, whenever
+    # those differ. That is the only base for which "the changes this run made"
+    # describes the resulting commit truthfully. The user's own edit is not
+    # discarded -- it is re-applied afterwards, and put back staged or unstaged
+    # exactly as it was found.
+    pending = capture_pending(args.dir, work_text)
+    base_text = pending["head"] if pending else (work_text or "")
+    prev_templates, custom = split_existing(base_text)
     prev_custom_patterns = count_patterns(custom)
     # Recommendations are recomputed here, not taken on trust, so the summary's
     # "why was this template included" grouping is derived from the same scan
@@ -747,16 +851,44 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
             "before that change and would be lost. Re-run to pick up the new content."
         )
 
-    if kept:
-        merged = api_text.rstrip("\n") + "\n\n" + "\n".join(kept) + "\n"
-        atomic_write(target, merged.encode("utf-8"))
+    def assemble(custom_lines: list[str]) -> bytes:
+        """The block plus these custom rules. No custom rules means the API bytes
+        verbatim, byte-identical, which is the case the block deserves."""
+        if not custom_lines:
+            return api_bytes
+        return (api_text.rstrip("\n") + "\n\n" + "\n".join(custom_lines) + "\n").encode("utf-8")
+
+    committed_bytes = assemble(kept)
+    carried: CarriedReport = {"added": [], "removed": [], "block_edited": False}
+    if pending:
+        work_custom, added, dropped = reapply_custom(
+            kept, custom, split_existing(pending["work"] or "")[1]
+        )
+        carried = {
+            "added": added,
+            "removed": dropped,
+            # An edit inside the block cannot survive: the block is regenerated
+            # wholesale from the API. Reported, never silently swallowed.
+            "block_edited": split_regions(pending["work"] or "")[1]
+            != split_regions(pending["head"])[1],
+        }
+        disk_bytes = assemble(work_custom)
+        verify_custom = work_custom
     else:
-        atomic_write(target, api_bytes)  # verbatim, byte-identical
+        disk_bytes = committed_bytes
+        verify_custom = kept
+
+    atomic_write(target, disk_bytes)
 
     # Verify what actually landed on disk before reporting success. A write that
     # lost a custom rule or picked up ANSI bytes is a hard failure here, not
     # something for a human to spot in the diff.
-    problems, written = verify_written(target, want, kept)
+    problems, written = verify_written(target, want, verify_custom)
+    # And separately verify the bytes that will be committed. Once a pending
+    # change is being carried, those are a different file from the one on disk,
+    # so checking only the disk would leave the committed version unchecked.
+    if pending:
+        problems += verify_bytes(committed_bytes, want, kept, "the version to be committed")
     if problems:
         die("post-write verification FAILED:\n  - " + "\n  - ".join(problems))
 
@@ -795,13 +927,54 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
             # Binds the bytes this run verified to the bytes gitwork.py will
             # commit: anything that rewrites .gitignore in between is caught
             # rather than committed on the strength of the path alone.
-            "internal": {"written_sha256": hashlib.sha256(written).hexdigest()},
+            # written_sha256 is the sha of what this run will COMMIT. Without a
+            # pending change that is also what is on disk; with one the two are
+            # deliberately different files, and worktree_sha256 pins the other.
+            "internal": {"written_sha256": hashlib.sha256(committed_bytes).hexdigest()},
         }
+        if pending:
+            # The hand-off that lets `commit` commit this run's work only: the
+            # work tree holds more than that, so it cannot just take what is on
+            # disk, and it has to be told what to put back afterwards.
+            #
+            # An index that matches HEAD carries nothing worth restoring -- after
+            # the commit it already holds the committed version -- so it is left
+            # alone rather than re-staged to the same bytes.
+            restore_index = ""
+            if pending["index"] is not None and pending["index"] != pending["head"]:
+                index_custom = reapply_custom(kept, custom, split_existing(pending["index"])[1])[0]
+                restore_index = assemble(index_custom).decode("utf-8")
+            facts["internal"] = {
+                **facts["internal"],
+                "pending_state": pending["state"],
+                "worktree_sha256": hashlib.sha256(written).hexdigest(),
+                "commit_text": committed_bytes.decode("utf-8"),
+                "restore_worktree": disk_bytes.decode("utf-8"),
+                "restore_index": restore_index,
+            }
     # Announce the primary write BEFORE the facts file: if the facts write then
     # fails, the caller already knows .gitignore itself landed and verified, and
     # the error reads as the scoped, separate problem it is.
     print(f"Wrote {target}")
     print("Verified: template block intact, custom rules preserved, 0 ESC bytes")
+    if pending:
+        # Say it plainly and early: the file on disk is deliberately NOT what
+        # will be committed, and a reader who assumes otherwise will misread the
+        # diff in the next step.
+        print(
+            f"Carried across your uncommitted change ({clean(pending['state'])}): "
+            "rebuilt from the committed .gitignore, your edit re-applied on top."
+        )
+        print("  the commit will contain this run's rebuild only")
+        for line in carried["added"]:
+            print(f"  + kept your added rule: {clean(line)}")
+        for line in carried["removed"]:
+            print(f"  - honoured your removal of: {clean(line)}")
+        if carried["block_edited"]:
+            print(
+                "  ! your edit touched the template block itself, which is "
+                "regenerated wholesale -- that part could not be carried across"
+            )
 
     if args.facts_out is not None:
         # Atomic: a half-written facts file would fail the next step with a JSON

@@ -476,102 +476,176 @@ def tracked_repo(tmp_path, api):
     return root
 
 
-class TestUncommittedGitignoreIsRefused:
-    """A run may only commit what that run wrote.
+class TestUncommittedChangeIsCarriedAcross:
+    """A run may only commit what that run wrote -- and must give back the rest.
 
     Defect this pins: with an uncommitted line already in .gitignore, the merge
-    carried it across as a custom rule and the commit shipped it as this run's
-    work -- the summary counted it among "custom rules kept" and never
-    distinguished it. An unstaged edit had a second failure on top: the
-    overwrite destroyed the only copy git did not have.
+    absorbed it as a custom rule and the commit shipped it as this run's work.
+    The summary counted it among "custom rules kept" and never distinguished it.
+
+    The fix is not a refusal. The rebuild is based on the COMMITTED file, so the
+    commit is honestly this run's own; the user's edit is then re-applied on top
+    in the work tree, staged and unstaged kept apart exactly as they were found.
     """
 
-    def write(self, run_script, root):
-        return run_script("gitignore.py", "--dir", str(root), "--force", "git", "node")
+    def write(self, run_script, root, facts=None):
+        args = ["gitignore.py", "--dir", str(root), "--force"]
+        if facts is not None:
+            args += ["--facts-out", str(facts)]
+        return run_script(*args, "git", "node")
 
-    def test_an_unstaged_edit_stops_the_run(self, tracked_repo, run_script):
+    # ── the rebuild is based on what is committed ───────────────────────────
+    def test_an_added_rule_is_not_in_the_committed_version(
+        self, tracked_repo, run_script, tmp_path
+    ):
+        facts = tmp_path / "f.json"
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
+        out = self.write(run_script, tracked_repo, facts)
+        assert out.returncode == 0, out.stderr
+        internal = json.loads(facts.read_text())["internal"]
+        assert "notes.txt" not in internal["commit_text"]
+        assert "my-secret-dir/" in internal["commit_text"]  # the committed rule survives
+
+    def test_an_added_rule_is_still_in_the_work_tree(self, tracked_repo, run_script):
+        """The whole point: the user does not lose their edit."""
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
+        assert self.write(run_script, tracked_repo).returncode == 0
+        assert "notes.txt" in (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+
+    def test_a_removed_rule_stays_removed_in_the_work_tree(self, tracked_repo, run_script):
+        """The case a plain three-way text merge conflicts on."""
+        (tracked_repo / ".gitignore").write_text("# hand written\n", encoding="utf-8")
+        assert self.write(run_script, tracked_repo).returncode == 0
+        text = (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+        _, custom = gi.split_existing(text)
+        assert "my-secret-dir/" not in [line.strip() for line in custom]
+
+    def test_a_removed_rule_is_still_in_the_committed_version(
+        self, tracked_repo, run_script, tmp_path
+    ):
+        facts = tmp_path / "f.json"
+        (tracked_repo / ".gitignore").write_text("# hand written\n", encoding="utf-8")
+        self.write(run_script, tracked_repo, facts)
+        internal = json.loads(facts.read_text())["internal"]
+        assert "my-secret-dir/" in internal["commit_text"]
+
+    def test_the_run_says_it_carried_something_across(self, tracked_repo, run_script):
+        """Silence here would let a reader assume the diff is the whole story."""
         (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
         out = self.write(run_script, tracked_repo)
-        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
-        assert "uncommitted changes (modified)" in out.stderr
+        assert "Carried across your uncommitted change (modified)" in out.stdout
+        assert "kept your added rule: notes.txt" in out.stdout
 
-    def test_an_unstaged_edit_survives_the_refusal(self, tracked_repo, run_script):
-        """The whole point of refusing before the write: git has no copy of this."""
-        edited = HAND_WRITTEN + "notes.txt\n"
-        (tracked_repo / ".gitignore").write_text(edited, encoding="utf-8")
-        self.write(run_script, tracked_repo)
-        assert (tracked_repo / ".gitignore").read_text(encoding="utf-8") == edited
+    def test_a_removal_is_reported_too(self, tracked_repo, run_script):
+        (tracked_repo / ".gitignore").write_text("# hand written\n", encoding="utf-8")
+        out = self.write(run_script, tracked_repo)
+        assert "honoured your removal of: my-secret-dir/" in out.stdout
 
-    def test_a_staged_edit_stops_the_run(self, tracked_repo, run_script):
+    # ── staged and unstaged are kept apart ──────────────────────────────────
+    def test_a_staged_edit_is_recorded_for_restoring(self, tracked_repo, run_script, tmp_path):
+        facts = tmp_path / "f.json"
         (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "staged.txt\n", encoding="utf-8")
         git(tracked_repo, "add", ".gitignore")
-        out = self.write(run_script, tracked_repo)
-        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
-        assert "uncommitted changes (staged)" in out.stderr
+        out = self.write(run_script, tracked_repo, facts)
+        assert out.returncode == 0, out.stderr
+        internal = json.loads(facts.read_text())["internal"]
+        assert internal["pending_state"] == "staged"
+        assert "staged.txt" in internal["restore_index"]
+        assert "staged.txt" not in internal["commit_text"]
 
-    def test_staged_and_unstaged_together_stops_the_run(self, tracked_repo, run_script):
-        """Porcelain "MM": dirty in the index and dirty again on top of it."""
+    def test_an_unstaged_edit_records_no_index_to_restore(self, tracked_repo, run_script, tmp_path):
+        """Nothing was staged, so the index must be left clean afterwards."""
+        facts = tmp_path / "f.json"
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
+        self.write(run_script, tracked_repo, facts)
+        internal = json.loads(facts.read_text())["internal"]
+        assert internal["restore_index"] == ""
+
+    def test_staged_and_unstaged_are_recorded_separately(self, tracked_repo, run_script, tmp_path):
+        """Porcelain "MM": three distinct versions, and all three matter."""
+        facts = tmp_path / "f.json"
         (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "one.txt\n", encoding="utf-8")
         git(tracked_repo, "add", ".gitignore")
-        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "two.txt\n", encoding="utf-8")
-        out = self.write(run_script, tracked_repo)
-        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+        (tracked_repo / ".gitignore").write_text(
+            HAND_WRITTEN + "one.txt\ntwo.txt\n", encoding="utf-8"
+        )
+        self.write(run_script, tracked_repo, facts)
+        internal = json.loads(facts.read_text())["internal"]
+        assert "one.txt" in internal["restore_index"] and "two.txt" not in internal["restore_index"]
+        assert (
+            "one.txt" in internal["restore_worktree"] and "two.txt" in internal["restore_worktree"]
+        )
+        assert "one.txt" not in internal["commit_text"]
 
-    def test_a_staged_deletion_stops_the_run(self, tracked_repo, run_script):
-        """No file on disk, so the existence check alone would have missed it --
-        and writing one would silently undo the deletion."""
-        git(tracked_repo, "rm", "-q", "--cached", ".gitignore")
-        (tracked_repo / ".gitignore").unlink()
-        out = self.write(run_script, tracked_repo)
-        assert out.returncode == gi.EXIT_DIRTY_GITIGNORE, out.stderr
+    def test_the_two_written_versions_really_do_differ(self, tracked_repo, run_script, tmp_path):
+        """If these were equal the whole mechanism would be a no-op."""
+        facts = tmp_path / "f.json"
+        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "notes.txt\n", encoding="utf-8")
+        self.write(run_script, tracked_repo, facts)
+        internal = json.loads(facts.read_text())["internal"]
+        assert internal["commit_text"] != internal["restore_worktree"]
+        on_disk = (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+        assert on_disk == internal["restore_worktree"]
+        assert internal["worktree_sha256"] == hashlib.sha256(on_disk.encode()).hexdigest()
+        assert (
+            internal["written_sha256"]
+            == hashlib.sha256(internal["commit_text"].encode()).hexdigest()
+        )
 
-    def test_the_refusal_says_what_to_do_about_it(self, tracked_repo, run_script):
-        """It is the user's change; the remedy has to be theirs to run."""
-        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "x\n", encoding="utf-8")
-        err = self.write(run_script, tracked_repo).stderr
-        assert "git stash push -- .gitignore" in err
-        assert "Commit them" in err
-
-    def test_nothing_is_fetched_before_the_refusal(self, tracked_repo, run_script, api):
-        """It refuses ahead of the network, so a dirty repo costs no API call."""
-        (tracked_repo / ".gitignore").write_text(HAND_WRITTEN + "x\n", encoding="utf-8")
-        self.write(run_script, tracked_repo)
-        assert api.invocations() == []
-
-    def test_a_clean_tracked_gitignore_is_written(self, tracked_repo, run_script):
-        """The refusal must not fire on the ordinary case."""
+    # ── an edit inside the block cannot survive, and says so ────────────────
+    def test_an_edit_inside_the_template_block_is_reported(self, tracked_repo, run_script):
+        """The block is regenerated wholesale; an edit to it is not carried."""
+        first = run_script("gitignore.py", "--dir", str(tracked_repo), "--force", "git", "node")
+        assert first.returncode == 0, first.stderr
+        git(tracked_repo, "add", ".gitignore")
+        git(tracked_repo, "commit", "-qm", "templated")
+        text = (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+        (tracked_repo / ".gitignore").write_text(
+            text.replace("node_modules/", "node_modules/  # mine"), encoding="utf-8"
+        )
         out = self.write(run_script, tracked_repo)
         assert out.returncode == 0, out.stderr
-        assert "my-secret-dir/" in (tracked_repo / ".gitignore").read_text(encoding="utf-8")
+        assert "your edit touched the template block itself" in out.stdout
 
-    def test_an_untracked_gitignore_is_written(self, tmp_path, api, run_script):
-        """A first run over a hand-written file is what this skill is for: there
-        is no committed version for the result to be confused with."""
+    # ── the cases that must behave exactly as before ────────────────────────
+    def test_a_clean_tracked_gitignore_records_nothing_pending(
+        self, tracked_repo, run_script, tmp_path
+    ):
+        facts = tmp_path / "f.json"
+        out = self.write(run_script, tracked_repo, facts)
+        assert out.returncode == 0, out.stderr
+        assert "commit_text" not in json.loads(facts.read_text())["internal"]
+        assert "Carried across" not in out.stdout
+
+    def test_an_untracked_gitignore_is_this_runs_own_work(self, tmp_path, api, run_script):
+        """No committed version to be confused with, so the whole file is ours."""
         root = init_repo(tmp_path / "untracked-ignore")
         (root / "package.json").write_text("{}", encoding="utf-8")
         (root / ".gitignore").write_text(HAND_WRITTEN, encoding="utf-8")
         api.set_block(api_block(["git", "node"]))
-        out = self.write(run_script, root)
+        facts = tmp_path / "f.json"
+        out = self.write(run_script, root, facts)
         assert out.returncode == 0, out.stderr
+        assert "commit_text" not in json.loads(facts.read_text())["internal"]
         assert "my-secret-dir/" in (root / ".gitignore").read_text(encoding="utf-8")
 
     def test_a_repo_with_no_gitignore_is_written(self, tmp_path, api, run_script):
         root = init_repo(tmp_path / "no-ignore")
         (root / "package.json").write_text("{}", encoding="utf-8")
         api.set_block(api_block(["git", "node"]))
-        out = self.write(run_script, root)
-        assert out.returncode == 0, out.stderr
+        assert self.write(run_script, root).returncode == 0
 
-    def test_outside_a_repo_there_is_nothing_to_check(self, cli_repo, run_script):
-        """No history, so the file on disk is the only copy either way."""
+    def test_outside_a_repo_nothing_is_carried(self, cli_repo, run_script, tmp_path):
+        """No history, so the file on disk is the only version there is."""
+        facts = tmp_path / "f.json"
         (cli_repo / ".gitignore").write_text(HAND_WRITTEN, encoding="utf-8")
-        out = self.write(run_script, cli_repo)
+        out = self.write(run_script, cli_repo, facts)
         assert out.returncode == 0, out.stderr
+        assert "commit_text" not in json.loads(facts.read_text())["internal"]
 
-    def test_a_symlink_is_refused_on_its_own_terms(self, tracked_repo, run_script):
-        """Ordering: git reports this tracked file as changed, so without the
-        symlink check running first the user would be told to commit a symlink
-        rather than that a symlink is refused outright."""
+    def test_a_symlink_is_still_refused(self, tracked_repo, run_script):
+        """Ordering: the symlink refusal runs before anything asks git, which
+        would otherwise answer about the link's target."""
         secret = tracked_repo / "id_rsa"
         secret.write_text("PRIVATE KEY\n", encoding="utf-8")
         (tracked_repo / ".gitignore").unlink()
@@ -580,9 +654,53 @@ class TestUncommittedGitignoreIsRefused:
         assert out.returncode == gi.EXIT_ERROR
         assert "symlink" in out.stderr
 
-    def test_the_check_is_a_no_op_outside_a_repo(self, tmp_path):
-        """Unit-level: the function itself, not the script around it."""
-        gi.refuse_uncommitted(str(tmp_path), str(tmp_path / ".gitignore"))
+
+class TestReapplyCustom:
+    """The merge itself, without a repository around it."""
+
+    def test_an_addition_lands_on_the_new_result(self):
+        result, added, removed = gi.reapply_custom(["a", "b"], ["a", "b"], ["a", "b", "c"])
+        assert result == ["a", "b", "c"] and added == ["c"] and removed == []
+
+    def test_a_removal_is_honoured(self):
+        result, added, removed = gi.reapply_custom(["a", "b"], ["a", "b"], ["b"])
+        assert result == ["b"] and removed == ["a"] and added == []
+
+    def test_removing_something_already_deduplicated_is_not_an_error(self):
+        """kept has already lost the line; the user removing it too is agreement."""
+        result, _, removed = gi.reapply_custom(["b"], ["a", "b"], ["b"])
+        assert result == ["b"] and removed == ["a"]
+
+    def test_an_unchanged_edit_changes_nothing(self):
+        result, added, removed = gi.reapply_custom(["a"], ["a", "b"], ["a", "b"])
+        assert result == ["a"] and added == [] and removed == []
+
+    def test_a_replacement_is_both_a_removal_and_an_addition(self):
+        result, added, removed = gi.reapply_custom(["a", "b"], ["a", "b"], ["a", "z"])
+        assert removed == ["b"] and added == ["z"] and result == ["a", "z"]
+
+    def test_the_users_additions_keep_their_order(self):
+        result, added, _ = gi.reapply_custom(["a"], ["a"], ["a", "x", "y"])
+        assert added == ["x", "y"] and result == ["a", "x", "y"]
+
+
+class TestSplitRegions:
+    def test_a_hand_written_file_is_all_custom(self):
+        templates, block, custom = gi.split_regions("a\nb\n")
+        assert templates == [] and block == [] and custom == ["a", "b"]
+
+    def test_the_block_is_returned_separately(self):
+        text = api_block(["git", "node"]) + "\ncustom/\n"
+        templates, block, custom = gi.split_regions(text)
+        assert templates == ["git", "node"]
+        assert block[0].startswith("# Created by") and block[-1].startswith("# End of")
+        assert "custom/" in custom
+
+    def test_split_existing_still_agrees_with_it(self):
+        """One parser, two callers -- they must not drift."""
+        text = api_block(["git", "node"]) + "\ncustom/\n"
+        templates, custom = gi.split_existing(text)
+        assert (templates, custom) == (gi.split_regions(text)[0], gi.split_regions(text)[2])
 
 
 # ── name validation ─────────────────────────────────────────────────────────

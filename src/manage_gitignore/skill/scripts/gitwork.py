@@ -36,8 +36,10 @@ from typing import NoReturn, cast
 from shared import (
     Facts,
     PushPlan,
+    atomic_write_bytes,
     clean,
     has_suspicious_chars,
+    preserved_mode,
     read_bytes_nofollow,
     read_bytes_or_die,
     refuse_option_like,
@@ -155,6 +157,43 @@ def has_commits(repo: str) -> bool:
     return rc == 0
 
 
+def version_at(repo: str, spec: str) -> str | None:
+    """`.gitignore` as of `spec`, or None when no version exists there.
+
+    spec is "HEAD" for the committed file and "" for the staged one -- git spells
+    the index as the empty side of `:path`. Text, not bytes: the callers parse it
+    into custom rules and never write it back verbatim, so a normalised trailing
+    newline changes nothing.
+    """
+    rc, out, _ = git(repo, "show", f"{spec}:{TARGET}", strip=False)
+    if rc != 0:
+        return None
+    return out + "\n" if out else ""
+
+
+def index_mode(repo: str) -> str:
+    """The mode git has recorded for .gitignore, defaulting to a regular file."""
+    rc, out, _ = git(repo, "ls-files", "--stage", "--", TARGET)
+    if rc == 0 and out:
+        return out.split()[0]
+    return "100644"
+
+
+def stage_content(repo: str, content: str) -> str:
+    """Put `content` in the index as .gitignore without touching the work tree.
+
+    Returns the blob sha. This is how a staged change survives a run: the work
+    tree keeps the user's version throughout, and the index is set from the
+    object store rather than by re-reading a file that no longer holds it.
+    """
+    rc, sha, err = git(repo, "hash-object", "-w", "--stdin", stdin=content)
+    if rc != 0 or not sha:
+        die(f"could not store .gitignore content: {err}")
+    entry = f"{index_mode(repo)},{sha},{TARGET}"
+    git(repo, "update-index", "--add", "--cacheinfo", entry, check=True)
+    return sha
+
+
 def file_state(repo: str) -> str:
     """One of: untracked, staged, modified, clean.
 
@@ -205,7 +244,21 @@ def cmd_status(args: argparse.Namespace) -> int:
         emit({"is_repo": False, "state": None, "diff": None})
         return 0
     state = file_state(repo)
-    cmd = diff_command(repo, state)
+    carried = ""
+    if getattr(args, "facts", None) is not None:
+        refuse_facts_alias(repo, args.facts)
+        carried = (load_facts(args.facts).get("internal") or {}).get("commit_text") or ""
+    if carried:
+        # The work tree holds this run's rebuild plus the user's own uncommitted
+        # edit. Diffing it would show the user their own change as if this run
+        # had made it -- the exact confusion the carry-across exists to remove.
+        # So the diff shown is HEAD against the version that will be committed.
+        _, blob, err = git(repo, "hash-object", "-w", "--stdin", stdin=carried)
+        if not blob:
+            die(f"could not stage the version to be committed for diffing: {err}")
+        cmd = ["diff", f"HEAD:{TARGET}", blob]
+    else:
+        cmd = diff_command(repo, state)
     rc, diff, err = git(repo, *cmd)
     # `git diff --no-index` exits 1 to mean "these differ", which is the normal
     # case for a first commit, not a failure.
@@ -368,6 +421,54 @@ def save_facts(path: str, facts: Facts) -> None:
 
 
 def cmd_commit(args: argparse.Namespace) -> int:
+    """Commit ONLY .gitignore, and only the part of it this run wrote.
+
+    When the file carried an uncommitted change, gitignore.py left the work tree
+    holding this run's rebuild *plus* that change re-applied -- which is what the
+    user should still have afterwards, and is more than may be committed. So this
+    swaps in the run's own version for the duration of the commit and puts the
+    user's back the moment it is over, committed or not.
+
+    The swap is a real file on disk rather than a synthetic commit-tree, because
+    the repository's hooks have to see what is being committed; they are part of
+    how its owner wants commits made.
+    """
+    repo = args.dir
+    require_repo(repo)
+    # Before the facts file is read for anything: a --facts pointing at
+    # .gitignore itself would have this function write the file it is meant to
+    # be committing.
+    refuse_facts_alias(repo, args.facts)
+    internal = (load_facts(args.facts).get("internal") or {}) if args.facts is not None else {}
+    carried = internal.get("commit_text") or ""
+    if not carried:
+        return commit_verified(args)
+
+    target_path = os.path.join(repo, TARGET)
+    on_disk = read_bytes_or_die(target_path, die)
+    expected = internal.get("worktree_sha256") or ""
+    if expected and hashlib.sha256(on_disk).hexdigest() != expected:
+        die(
+            f"{TARGET} changed since it was written; refusing to commit, and refusing "
+            "to overwrite whatever is there now. Re-run from the write step."
+        )
+    mode = preserved_mode(target_path)
+    atomic_write_bytes(target_path, carried.encode("utf-8"), mode=mode)
+    try:
+        return commit_verified(args)
+    finally:
+        # Unconditional: a refused or failed commit must still give the user
+        # their file back. Restoring the index only when something was staged
+        # keeps a clean index clean.
+        atomic_write_bytes(
+            target_path, (internal.get("restore_worktree") or "").encode("utf-8"), mode=mode
+        )
+        staged = internal.get("restore_index") or ""
+        if staged:
+            stage_content(repo, staged)
+
+
+def commit_verified(args: argparse.Namespace) -> int:
     """Stage and commit ONLY .gitignore, leaving the rest of the index intact."""
     repo = args.dir
     require_repo(repo)
@@ -915,7 +1016,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, parents=[before], allow_abbrev=False)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    subcommand("status", help="repo/tracked state plus the actual diff")
+    p = subcommand("status", help="repo/tracked state plus the actual diff")
+    p.add_argument(
+        "--facts",
+        help=(
+            "the run's facts JSON. Required whenever .gitignore carried an uncommitted "
+            "change: without it the diff shown is the work tree, which holds that change "
+            "too, rather than the version that will actually be committed."
+        ),
+    )
 
     p = subcommand("commit", help=f"commit ONLY {TARGET} from a message file")
     p.add_argument("--message-file", required=True)
