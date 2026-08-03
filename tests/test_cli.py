@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +75,59 @@ class TestSkillSource:
         config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         targets = config["tool"]["hatch"]["build"]["targets"]
         assert [name for name, t in targets.items() if "force-include" in t] == []
+
+
+class TestVersionHasOneHome:
+    """`--version` must agree with the packaged version.
+
+    Defect this pins: __version__ was a literal in __init__.py, a second
+    authoritative home for a fact pyproject.toml already owned. It drifted on
+    the first bump, and 0.2.0 went to PyPI announcing itself as 0.1.0 -- the
+    metadata was right, the command was wrong, and nothing compared them.
+    """
+
+    def test_it_matches_the_packaged_version(self):
+        from manage_gitignore import __version__
+
+        if __version__ == "0+unknown":
+            # A bare checkout on sys.path with nothing installed: there is no
+            # distribution to read a version from, which is the documented
+            # fallback rather than a failure. CI installs the package, so this
+            # comparison does run there.
+            pytest.skip("package not installed in this environment")
+        if tomllib is None:
+            pytest.skip("tomllib needs 3.11+; CI checks this on every later version")
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.is_file():
+            pytest.skip("no checkout")
+        packaged = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+        assert __version__ == packaged
+
+    def test_the_command_prints_that_same_version(self, capsys):
+        from manage_gitignore import __version__
+
+        assert cli.main(["--version"]) == 0
+        assert capsys.readouterr().out.strip() == __version__
+
+    def test_it_is_not_written_down_twice(self):
+        """A literal here would pass the comparison above until the next bump.
+
+        Parsed, not grepped: the comment explaining why the literal is gone
+        quotes the literal, and a substring match cannot tell the two apart.
+        The same trap this file already documents for `force-include`.
+        """
+        source = (Path(cli.__file__).parent / "__init__.py").read_text(encoding="utf-8")
+        literals = [
+            node.value.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and any(isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets)
+        ]
+        # The not-installed sentinel is allowed; anything shaped like a release
+        # number is the duplicate this test exists to keep out.
+        assert [v for v in literals if re.match(r"^\d+\.\d", v)] == []
 
 
 class TestShippedTextIsPlain:

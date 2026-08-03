@@ -10,4 +10,15 @@ skill directory still works if you keep it.
 - `skill/`   SKILL.md, references/, and the scripts that do the work
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    # Read from the installed distribution rather than repeated here. This line
+    # used to be `__version__ = "0.1.0"`, a second authoritative home for a fact
+    # pyproject.toml already owned -- and it drifted on the very first bump, so
+    # 0.2.0 shipped to PyPI announcing itself as 0.1.0.
+    __version__ = version("manage-gitignore")
+except PackageNotFoundError:  # pragma: no cover - a checkout with nothing installed
+    # Running from source with PYTHONPATH=src and no install, as the Makefile
+    # does. Saying so beats reporting a number that came from nowhere.
+    __version__ = "0+unknown"
