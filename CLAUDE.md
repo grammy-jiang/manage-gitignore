@@ -158,17 +158,34 @@ product, not a refactor.
 
 ## Releasing
 
-Tag-driven. Bump `version` in `pyproject.toml`, tag `v<that version>`, push the
-tag; `release.yml` re-runs the full verify, checks the tag matches the packaged
-version, builds, attaches the artifacts to a GitHub Release, and publishes to
-PyPI via Trusted Publishing. No token is stored in this repository.
+Tag-driven and gated. Bump `version` in `pyproject.toml`, tag `v<that version>`,
+push the tag. `release.yml` then runs, in order:
 
-**Not yet done:** the PyPI trusted publisher must be created once before the
-first release, at <https://pypi.org/manage/account/publishing/> — project
-`manage-gitignore`, owner `grammy-jiang`, repository `manage-gitignore`, workflow
-`release.yml`, environment `pypi`. Until it exists the `pypi` job fails while
-`build` and `github-release` still succeed, so a tag always produces downloadable
-artifacts.
+1. `check-tag` — the tag must match the packaged version. Seconds, so a typo
+   fails before five test matrices have run.
+2. `gates` — `ci.yml` called as a reusable workflow: tests on 3.10 through 3.14,
+   lint, type-check, and the per-file coverage floor. Not a copy of those steps;
+   a copy drifts, and the copy is the one a release would be trusting.
+3. `build` — sdist and wheel, `twine check`, uploaded as an artifact.
+4. `github-release` — attaches them to a GitHub Release.
+5. `pypi` — Trusted Publishing (OIDC), no token stored here. Last on purpose:
+   the artifacts are already downloadable by then, and this is the one step that
+   cannot be undone.
+
+Nothing is built unless every gate passes.
+
+The trusted publisher is configured at
+<https://pypi.org/manage/account/publishing/> — project `manage-gitignore`,
+owner `grammy-jiang`, repository `manage-gitignore`, workflow `release.yml`,
+environment `pypi`. If the `pypi` job ever fails on a claim mismatch, `build`
+and `github-release` still succeed, so the tag has already produced downloadable
+artifacts and nothing was uploaded: fix the publisher and re-run the job. No
+version is burned by a failed publish, only by a successful one.
+
+Check `git ls-files -z | xargs -0 grep -lP '\x1b'` before tagging — or just run
+the suite, which now does it. A file written through a colorizing shell looks
+correct in a terminal and is corrupt on disk, and PyPI will not let you replace
+a version once it is published.
 
 ## Provenance
 
