@@ -1,18 +1,23 @@
 name: Release
 
-# Tag-driven: pushing v* builds the distributions, attaches them to a GitHub
-# Release, and publishes to PyPI via Trusted Publishing (OIDC) — no API token is
-# stored anywhere in this repository.
+# Tag-driven, and gated. Pushing v* runs the full CI suite — tests on 3.10
+# through 3.14, lint, type-check, and the per-file coverage floor — and only if
+# all of it passes does anything get built, attached to a GitHub Release, or
+# published to PyPI via Trusted Publishing (OIDC). No API token is stored here.
 #
-# One-time PyPI setup before the first release, at
-# https://pypi.org/manage/account/publishing/ :
+# The gate is `ci.yml` itself, called as a reusable workflow, not a second copy
+# of the same steps. A copy drifts from the original, and the copy is the one a
+# release would be trusting.
+#
+# PyPI setup (one time), at https://pypi.org/manage/account/publishing/ :
 #   PyPI project name  manage-gitignore
 #   Owner              grammy-jiang
 #   Repository         manage-gitignore
 #   Workflow           release.yml
 #   Environment        pypi
-# Until that publisher exists the `pypi` job fails; `build` and `github-release`
-# still succeed, so a tag always produces downloadable artifacts.
+# A failed `pypi` job uploads nothing, so the version is not burned: fix the
+# publisher and re-run the job. `build` and `github-release` still succeed, so a
+# tag always produces downloadable artifacts.
 
 on:
   push:
@@ -23,7 +28,34 @@ permissions:
   contents: read
 
 jobs:
+  # Cheap and first: a tag that disagrees with the packaged version fails in
+  # seconds rather than after five test matrices have run.
+  check-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the packaged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match project version $pkg" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches project version $pkg"
+
+  # Every gate CI applies to a pull request, applied to the tag as well.
+  gates:
+    needs: check-tag
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -34,30 +66,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: python -m pip install --upgrade pip && pip install -e '.[dev]' build
-
-      - name: Configure git
-        run: |
-          git config --global user.email "ci@example.invalid"
-          git config --global user.name "CI"
-          git config --global init.defaultBranch main
-
-      - name: Verify before building
-        # A tag must not ship what CI would have rejected.
-        run: |
-          ruff check .
-          ruff format --check .
-          mypy
-          pytest
-
-      - name: Check the tag matches the packaged version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          if [ "$tag" != "$pkg" ]; then
-            echo "tag $GITHUB_REF_NAME does not match project version $pkg" >&2
-            exit 1
-          fi
+        run: python -m pip install --upgrade pip && pip install build
 
       - name: Build sdist and wheel
         run: python -m build
@@ -91,7 +100,10 @@ jobs:
             --generate-notes
 
   pypi:
-    needs: build
+    # Last, and only after the artifacts are already downloadable from the
+    # GitHub Release. A PyPI upload is the one step in this workflow that cannot
+    # be undone — a version number, once published, can never be reused.
+    needs: [build, github-release]
     runs-on: ubuntu-latest
     environment:
       name: pypi
