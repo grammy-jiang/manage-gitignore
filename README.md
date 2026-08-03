@@ -46,71 +46,10 @@ The scripts under `skill/scripts/` are how the skill does that work. They are
 its internals, driven by `SKILL.md`; **calling them yourself is not a supported
 interface** and their arguments may change without notice.
 
-## Design principle
-
-**Anything a program can decide, a program decides.** When an agent drives this,
-it asks the user, judges the answers, writes the commit message, and relays
-results — nothing else. Scanning, merging, verification, every number in the
-summary, and every git mutation live in the code, where they are testable and
-where a wrong answer is an exit code rather than a plausible sentence.
-
-## Layout
-
-Everything the skill does lives in the skill directory. The package around it is
-one file.
-
-| Path | Owns |
-|---|---|
-| `src/manage_gitignore/skill/SKILL.md` | the agent-facing procedure |
-| `src/manage_gitignore/skill/scripts/templates.py` | the `.gitignore` file: scan → recommend → fetch → merge → write → verify |
-| `src/manage_gitignore/skill/scripts/gitwork.py` | git: status/diff, commit, push planning, push, facts |
-| `src/manage_gitignore/skill/scripts/summary.py` | the end-of-run summary format |
-| `src/manage_gitignore/skill/scripts/shared.py` | one sanitiser, one no-follow reader, one JSON contract |
-| `src/manage_gitignore/skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
-| `src/manage_gitignore/cli.py` | the installer: `install` / `uninstall`. Nothing else |
-| `tests/` | pytest suite |
-
-Two properties this layout is chosen for, both of them tested:
-
-**The scripts are self-contained.** They import each other by plain module name,
-resolved from their own directory the way `python3 <dir>/foo.py` resolves
-anything, and they never import `manage_gitignore`. The skill directory is
-therefore complete on its own — which is what lets `install` publish it as a
-bare symlink, with the installed skill depending on nothing the symlink does not
-already reach. The test suite runs the scripts as subprocesses with `PYTHONPATH`
-*removed*, so a green run is evidence of this rather than an assertion about it.
-
-**The checkout and the installed tree are the same paths.** Nothing is remapped
-at build time, so `manage_gitignore/skill/scripts/gitwork.py` names the same file
-here and in `site-packages`: a path in a traceback, or the target of the
-installed symlink, traces back to this repository by relative position, with no
-layout translation to work out first.
-
-## Development
-
-```bash
-pip install -e '.[dev]'
-make verify     # lint + format check + mypy + tests — run before shipping
-make build      # sdist + wheel into dist/
-```
-
-The package has **no third-party runtime dependencies** — only the standard
-library, plus `curl` and `git` on `PATH`.
-
-### Testing notes
-
-- **No test touches the network.** A stub `curl` goes on `PATH` (see
-  `tests/conftest.py`), so the real fetch path — including the streaming byte cap
-  and the response validation — runs offline against canned responses.
-- **Git behaviour is tested against real repositories**, not mocks. This is code
-  that commits and pushes; a mock that agrees with a wrong assumption is worse
-  than no test.
-- Most tests pin a defect found in review. Where that is so, the docstring says
-  which one, so a regression fails with its reason attached.
-
 ## Safety properties
 
-Each fails closed, and each has a test:
+This tool writes to your repository and, with your say-so, pushes. Each of these
+fails closed, and each has a test:
 
 - a response that is not exactly the requested gitignore.io block is never written
 - a symlinked, FIFO, or oversized `.gitignore` is refused, never followed
@@ -128,13 +67,18 @@ Each fails closed, and each has a test:
 - no repo- or API-derived text can forge a line or an escape sequence in the
   summary
 
-## Provenance
-
-Built with Claude Code, then reviewed across ten rounds by a nine-agent panel
+Most of that list came from review rather than from the first draft: this was
+built with Claude Code, then examined across ten rounds by a nine-agent panel
 (skill design, Python, testing, application security, shell, documentation,
-software design, test design, UX). Around 390 findings were applied; a few were
-declined because they would have broken the job — those declines are recorded in
-the code comments where they apply.
+software design, test design, UX), and around 390 findings were applied.
+
+## Contributing
+
+The package has **no third-party runtime dependencies** — standard library only,
+plus `curl` and `git` on `PATH`.
+
+See [CLAUDE.md](CLAUDE.md): repository layout, the rules that hold its shape,
+build and test commands, and the release process.
 
 ## License
 
