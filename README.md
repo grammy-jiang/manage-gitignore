@@ -74,8 +74,8 @@ software design, test design, UX), and around 390 findings were applied.
 
 ## Contributing
 
-The package has **no third-party runtime dependencies** — standard library only,
-plus `curl` and `git` on `PATH`.
+Runs on Python 3.10 through 3.14, with **no third-party runtime dependencies** —
+standard library only, plus `curl` and `git` on `PATH`.
 
 See [CLAUDE.md](CLAUDE.md): repository layout, the rules that hold its shape,
 build and test commands, and the release process.

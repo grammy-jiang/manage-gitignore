@@ -19,7 +19,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Callable
-from typing import NoReturn, NotRequired, TypedDict
+from typing import NoReturn, TypedDict
 
 # Everything invisible or text-moving, written once and shared by both patterns
 # below so they cannot drift apart:
@@ -332,4 +332,4 @@ class Facts(TypedDict, total=False):
     commit: CommitFacts
     net: NetFacts
     notes: list[str]
-    internal: NotRequired[InternalFacts]
+    internal: InternalFacts

@@ -4,8 +4,9 @@ This repository ships **one thing: a Claude Code skill**, delivered as a Python
 package. `README.md` is written for people installing it. This file is for
 whoever is editing it.
 
-Run `make verify` before you push. CI runs the same checks on 3.11, 3.12 and
-3.13, and a tag will not build if they fail.
+Run `make verify` before you push, and `make coverage` if you touched a script.
+CI runs the tests on 3.10 through 3.14, lints and type-checks on 3.10, and gates
+every file at 90% coverage. A tag will not build if any of that fails.
 
 ## Layout
 
@@ -70,10 +71,16 @@ to work it out. `SKILL.md` went from 538 to 275 lines by applying this once.
 ```bash
 pip install -e '.[dev]'
 make verify     # lint + format check + mypy + tests — before every push
+make coverage   # the same suite under coverage, then the per-file floor
 make format     # ruff format + ruff check --fix
 make build      # sdist + wheel into dist/
 make install    # symlink the skill from this checkout into ~/.claude/skills/
 ```
+
+The suite runs in parallel (`-n auto --dist loadfile`, from pytest-xdist): it
+spends most of its time in subprocesses and throwaway git repos, so it scales
+well across cores. `loadfile` keeps one module's tests on one worker, which
+keeps a failure's output contiguous. To debug serially, `pytest -p no:xdist`.
 
 `make install` points the link at the working tree, so edits take effect on the
 next Claude Code restart with no rebuild. To test what users get instead, build
@@ -95,6 +102,37 @@ script under two module names at once — `manage_gitignore.skill.scripts.shared
 - Most tests pin a defect found in review. Where that is so, the docstring says
   which one, so a regression fails with its reason attached. Keep this up: when
   you fix a bug, the test that pins it should say what it is.
+
+### Coverage
+
+**Every file must stay at or above 90%**, enforced by `tests/check_coverage.py`
+in both `make coverage` and CI. The floor is per file on purpose: a project
+total hides a hole, because one thoroughly covered 800-line script carries a
+barely-touched 200-line one well past 90% overall.
+
+Measuring needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
+the suite drives the scripts as subprocesses, which a plain coverage run cannot
+see — without it the report reads about 66% when the truth is 99%. Do not chase
+that phantom third with new tests; run `make coverage` and look at the real
+number first.
+
+What is deliberately not covered: two defensive branches in `gitwork.py` — a git
+plumbing command failing outright, and `commit` failing *and* its cleanup
+`git reset` failing too. Both would need a mock of git itself, which would test
+the mock.
+
+### Python versions
+
+3.10 through 3.14, and the test matrix runs all five. Two constraints follow
+from 3.10 that are easy to trip:
+
+- `typing.NotRequired` is 3.11+. Use a total base class plus a `total=False`
+  subclass instead (see `DetectRule` in `templates.py`). `typing_extensions`
+  is not an option — a symlink-installed skill has nothing to install it.
+- `tomllib` is 3.11+. The one test that needs it skips on 3.10.
+
+mypy runs at `python_version = "3.10"` so it catches both classes of mistake
+before a user on 3.10 does.
 
 ## Safety properties
 

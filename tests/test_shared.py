@@ -13,14 +13,82 @@ import stat
 import pytest
 
 from shared import (
+    MAX_READ_BYTES,
     NotARegularFile,
     SymlinkRefused,
+    TooLarge,
     atomic_write_bytes,
     clean,
     has_suspicious_chars,
     read_bytes_nofollow,
     read_bytes_or_die,
+    write_json_or_die,
 )
+
+
+class Died(Exception):
+    """Stands in for a script's `die`, which exits the process."""
+
+
+def die(msg: str):
+    raise Died(msg)
+
+
+class TestSizeCap:
+    """An unbounded read is an unbounded allocation, and nothing this skill
+    reads is legitimately large."""
+
+    def test_a_file_over_the_cap_is_refused(self, tmp_path):
+        big = tmp_path / "big"
+        big.write_bytes(b"x" * 64)
+        with pytest.raises(TooLarge, match="larger than 32 bytes"):
+            read_bytes_nofollow(str(big), max_bytes=32)
+
+    def test_a_file_exactly_at_the_cap_is_allowed(self, tmp_path):
+        """Off-by-one guard: the cap is a limit, not a forbidden size."""
+        exact = tmp_path / "exact"
+        exact.write_bytes(b"x" * 32)
+        assert read_bytes_nofollow(str(exact), max_bytes=32) == b"x" * 32
+
+    def test_the_default_cap_is_generous_enough_for_a_real_file(self, tmp_path):
+        ordinary = tmp_path / ".gitignore"
+        ordinary.write_bytes(b"node_modules/\n" * 500)
+        assert len(read_bytes_nofollow(str(ordinary))) < MAX_READ_BYTES
+
+    def test_read_bytes_or_die_turns_the_refusal_into_die(self, tmp_path):
+        """All three refusals reach the caller as die(), so a script reports an
+        oversized file the same way it reports a symlinked one.
+
+        Written at the real default rather than a patched one: the cap is a
+        default argument, bound at definition, so patching the module attribute
+        would pass while changing nothing.
+        """
+        big = tmp_path / "big"
+        big.write_bytes(b"x" * (MAX_READ_BYTES + 1))
+        with pytest.raises(Died, match="larger than"):
+            read_bytes_or_die(str(big), die)
+
+    def test_a_missing_file_dies_with_the_path(self, tmp_path):
+        with pytest.raises(Died, match="cannot read"):
+            read_bytes_or_die(str(tmp_path / "absent"), die)
+
+
+class TestWriteJsonOrDie:
+    def test_writes_readable_json(self, tmp_path):
+        path = tmp_path / "facts.json"
+        write_json_or_die(str(path), {"a": 1}, die)
+        assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
+
+    def test_an_unwritable_destination_dies_rather_than_raising(self, tmp_path):
+        """The scripts report a bad facts path the same way they report a bad
+        .gitignore path -- as a refusal, not a traceback."""
+        locked = tmp_path / "locked"
+        locked.mkdir(mode=0o500)
+        try:
+            with pytest.raises(Died, match="cannot write facts file"):
+                write_json_or_die(str(locked / "facts.json"), {"a": 1}, die)
+        finally:
+            locked.chmod(0o700)
 
 
 class TestClean:

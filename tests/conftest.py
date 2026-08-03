@@ -92,6 +92,11 @@ if mode == "fail":
     sys.exit(22)
 if mode == "hang":
     time.sleep(float(os.environ.get("FAKE_CURL_HANG", "300")))
+if mode == "linger":                      # body, then EOF, then refuse to exit
+    sys.stdout.buffer.write(b"# Created by nothing\\n")
+    sys.stdout.buffer.flush()
+    os.close(sys.stdout.fileno())         # EOF, so the read loop finishes...
+    time.sleep(float(os.environ.get("FAKE_CURL_HANG", "300")))   # ...but wait() does not
 if mode == "flood":                       # unbounded body -> the cap must fire
     while True:
         sys.stdout.buffer.write(b"x" * 65536)
@@ -143,7 +148,13 @@ class FakeApi:
         return [line.split("\x00") for line in log.read_text().splitlines() if line]
 
     def set_mode(self, mode: str, *, hang_seconds: float | None = None) -> None:
-        """ok | fail | hang | flood. Routed through monkeypatch so it is undone."""
+        """ok | fail | hang | linger | flood.
+
+        `hang` never writes, so the read deadline is what stops it. `linger`
+        writes then closes stdout without exiting, which is the other stall:
+        the read loop reaches EOF happily and the wait is what must time out.
+        Routed through monkeypatch so every mode is undone after the test.
+        """
         self._monkeypatch.setenv("FAKE_CURL_MODE", mode)
         if hang_seconds is not None:
             self._monkeypatch.setenv("FAKE_CURL_HANG", str(hang_seconds))
@@ -261,23 +272,54 @@ def clone_of():
     return _clone
 
 
+# Most of the suite drives the scripts as subprocesses, which a plain coverage
+# run cannot see -- it measures this process only. `make coverage` sets this, so
+# the report covers what the tests actually exercise instead of understating it
+# by a third. Off by default: it costs a coverage startup per subprocess, and
+# hundreds of subprocesses run here.
+#
+# `coverage run <script>` sets sys.path[0] to the script's own directory, the
+# same as `python <script>`, so this does NOT weaken the standalone check below.
+COVER_SUBPROCESSES = os.environ.get("MG_COVER_SUBPROCESS") == "1"
+
+
+def script_env() -> dict[str, str]:
+    """The environment a bundled script is run with.
+
+    PYTHONPATH is removed, not extended. The scripts ship with the skill and are
+    run by path, so the only thing that may put their siblings within reach is
+    sys.path[0] -- the directory the script itself is in. Handing them an import
+    path here would hide a dependency on something installed, which is precisely
+    what must not exist.
+    """
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def script_command(script_path, args) -> list[str]:
+    """The argv to run `script_path`, under coverage when asked.
+
+    `coverage run <script>` sets sys.path[0] to the script's own directory, the
+    same as `python <script>`, so this does not weaken the standalone property
+    script_env() exists to preserve.
+    """
+    launcher = [sys.executable]
+    if COVER_SUBPROCESSES:
+        launcher += ["-m", "coverage", "run", "--parallel-mode", f"--rcfile={REPO}/pyproject.toml"]
+    return [*launcher, str(script_path), *args]
+
+
 @pytest.fixture
 def run_script():
     """Factory: run a bundled script as a subprocess and return the result."""
 
     def _run(script: str, *args: str) -> subprocess.CompletedProcess:
-        env = os.environ.copy()
-        # PYTHONPATH is removed, not extended. The scripts are bundled with the
-        # skill and run by path, so the only thing that may put their siblings
-        # within reach is sys.path[0] -- the directory the script itself is in.
-        # Handing them an import path here would hide a dependency on something
-        # installed, which is precisely what must not exist.
-        env.pop("PYTHONPATH", None)
         return subprocess.run(
-            [sys.executable, str(MODULE[script]), *args],
+            script_command(MODULE[script], args),
             capture_output=True,
             text=True,
-            env=env,
+            env=script_env(),
         )
 
     return _run
