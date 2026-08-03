@@ -49,7 +49,11 @@ include = ["src", "tests", "README.md", "LICENSE", "Makefile", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# Two roots because there are two things under test: the installer, imported as
+# a package, and the skill's scripts, which are run by path and so import each
+# other as top-level modules. Putting the scripts directory on the path is what
+# a plain `python3 <skill-dir>/scripts/foo.py` does for free.
+pythonpath = ["src", "src/manage_gitignore/skill/scripts"]
 addopts = "-q --strict-markers --strict-config"
 markers = ["slow: takes more than a second"]
 filterwarnings = ["error"]
@@ -63,7 +67,9 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["manage_gitignore", "conftest"]
+# The skill's scripts import each other as top-level modules, so name them here
+# or isort files them with the standard library.
+known-first-party = ["manage_gitignore", "conftest", "shared", "templates", "gitwork", "summary"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests build long literal fixtures and reach into module internals on purpose.
@@ -71,7 +77,21 @@ known-first-party = ["manage_gitignore", "conftest"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src/manage_gitignore"]
+# Two roots, because there are two programs here: the installer package, and the
+# skill's scripts, which resolve each other from their own directory the way any
+# script run by path does. Both must be declared as package bases -- given only
+# one, mypy reaches a script under two module names at once
+# ("manage_gitignore.skill.scripts.shared" and "shared") and refuses to check
+# anything. Listing the files rather than the package directory keeps the walk
+# from descending into the skill a second time.
+mypy_path = ["src", "src/manage_gitignore/skill/scripts"]
+explicit_package_bases = true
+namespace_packages = true
+files = [
+    "src/manage_gitignore/__init__.py",
+    "src/manage_gitignore/cli.py",
+    "src/manage_gitignore/skill/scripts",
+]
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true

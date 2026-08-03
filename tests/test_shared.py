@@ -12,7 +12,7 @@ import stat
 
 import pytest
 
-from manage_gitignore.shared import (
+from shared import (
     NotARegularFile,
     SymlinkRefused,
     atomic_write_bytes,
@@ -119,7 +119,7 @@ class TestReadBytesOrDie:
 
 class TestWriteJson:
     def test_a_new_file_honours_the_umask(self, tmp_path):
-        from manage_gitignore import shared as _shared
+        import shared as _shared
 
         target = tmp_path / "facts.json"
         old = os.umask(0o027)
@@ -131,7 +131,7 @@ class TestWriteJson:
 
     def test_an_existing_files_permissions_survive_a_rewrite(self, tmp_path):
         """Several commands update this file in turn; each must not narrow it."""
-        from manage_gitignore import shared as _shared
+        import shared as _shared
 
         target = tmp_path / "facts.json"
         _shared.write_json(str(target), {"a": 1})
@@ -146,7 +146,7 @@ class TestWriteJson:
         Facts paths have no symlink gate of their own, so this is what keeps a
         --facts pointed at a symlink from clobbering the link's target.
         """
-        from manage_gitignore import shared as _shared
+        import shared as _shared
 
         secret = tmp_path / "secret"
         secret.write_text("PRIVATE\n", encoding="utf-8")
@@ -158,7 +158,7 @@ class TestWriteJson:
         assert json.loads(link.read_text()) == {"a": 1}
 
     def test_no_temp_file_is_left_behind(self, tmp_path):
-        from manage_gitignore import shared as _shared
+        import shared as _shared
 
         _shared.write_json(str(tmp_path / "facts.json"), {"a": 1})
         assert list(tmp_path.glob(".tmp-*")) == []
@@ -167,7 +167,7 @@ class TestWriteJson:
 class TestAtomicWriteBytes:
     def test_a_crash_mid_write_leaves_no_partial_file(self, tmp_path, monkeypatch):
         """The cleanup branch was asserted only by a comment."""
-        from manage_gitignore import shared as _shared
+        import shared as _shared
 
         target = tmp_path / "out"
         target.write_bytes(b"original")

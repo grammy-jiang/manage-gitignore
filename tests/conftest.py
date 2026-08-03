@@ -15,15 +15,16 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-PACKAGE = REPO / "src" / "manage_gitignore"
+SCRIPTS = REPO / "src" / "manage_gitignore" / "skill" / "scripts"
 
-# The tests drive the modules as subprocesses, the way the skill does. Mapping
-# the old script names keeps every call site readable after the package rename.
+# The tests drive the scripts as subprocesses, by path, exactly as SKILL.md
+# does. Mapping the old script names keeps every call site readable across the
+# renames.
 MODULE = {
-    "gitignore.py": PACKAGE / "templates.py",
-    "gitwork.py": PACKAGE / "gitwork.py",
-    "render_summary.py": PACKAGE / "summary.py",
-    "summary": PACKAGE / "summary.py",
+    "gitignore.py": SCRIPTS / "templates.py",
+    "gitwork.py": SCRIPTS / "gitwork.py",
+    "render_summary.py": SCRIPTS / "summary.py",
+    "summary": SCRIPTS / "summary.py",
 }
 API = "https://www.toptal.com/developers/gitignore/api"
 
@@ -266,11 +267,12 @@ def run_script():
 
     def _run(script: str, *args: str) -> subprocess.CompletedProcess:
         env = os.environ.copy()
-        # Run as a module path with src/ importable, so `from manage_gitignore...`
-        # resolves exactly as it will for an installed package.
-        env["PYTHONPATH"] = os.pathsep.join([str(REPO / "src"), env.get("PYTHONPATH", "")]).rstrip(
-            os.pathsep
-        )
+        # PYTHONPATH is removed, not extended. The scripts are bundled with the
+        # skill and run by path, so the only thing that may put their siblings
+        # within reach is sys.path[0] -- the directory the script itself is in.
+        # Handing them an import path here would hide a dependency on something
+        # installed, which is precisely what must not exist.
+        env.pop("PYTHONPATH", None)
         return subprocess.run(
             [sys.executable, str(MODULE[script]), *args],
             capture_output=True,

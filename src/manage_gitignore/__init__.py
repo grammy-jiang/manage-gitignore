@@ -1,12 +1,13 @@
-"""Build a repository's .gitignore from gitignore.io, keeping its custom rules.
+"""Installer for the `manage-gitignore` Claude Code skill.
 
-The package behind the `manage-gitignore` Claude Code skill. Each module owns one
-decision the skill must not make by eye:
+This package ships one command pair -- `install` and `uninstall` -- and the
+skill directory they link. It holds none of the logic: `skill/scripts/` does,
+beside the SKILL.md that drives it, and those scripts import each other by
+plain module name and never import this package. Uninstall the wheel and the
+skill directory still works if you keep it.
 
-- `templates`  the .gitignore file: scan, recommend, fetch, merge, write, verify
-- `gitwork`    git: status/diff, commit, push planning, push, facts
-- `summary`    the end-of-run summary format
-- `shared`     one sanitiser, one no-follow reader, one JSON contract
+- `cli`      install / uninstall
+- `skill/`   SKILL.md, references/, and the scripts that do the work
 """
 
 __version__ = "0.1.0"

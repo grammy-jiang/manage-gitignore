@@ -7,7 +7,9 @@ and refuse to touch anything else.
 
 from __future__ import annotations
 
+import ast
 import os
+import sys
 import tomllib
 from pathlib import Path
 
@@ -56,6 +58,44 @@ class TestSkillSource:
         config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         targets = config["tool"]["hatch"]["build"]["targets"]
         assert [name for name, t in targets.items() if "force-include" in t] == []
+
+
+class TestTheScriptsStandAlone:
+    """The package installs the skill. It does not run it, and it is not needed
+    to run it. Both halves of that are structural, so both are checked by
+    reading the imports rather than by trusting the prose."""
+
+    def scripts(self) -> list[Path]:
+        found = sorted((cli.skill_source() / "scripts").glob("*.py"))
+        assert found, "no scripts found beside SKILL.md"
+        return found
+
+    def imported_roots(self, path: Path) -> set[str]:
+        """Every top-level module name `path` imports, at any indent."""
+        roots: set[str] = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                roots |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+        return roots
+
+    def test_no_script_imports_the_package(self):
+        """Otherwise the skill directory would not work with the wheel gone."""
+        offenders = {p.name: self.imported_roots(p) & {"manage_gitignore"} for p in self.scripts()}
+        assert {name: found for name, found in offenders.items() if found} == {}
+
+    def test_the_installer_does_not_import_the_scripts(self):
+        """The reverse direction: installing must not run any of the work."""
+        script_names = {p.stem for p in self.scripts()}
+        assert self.imported_roots(Path(cli.__file__)) & script_names == set()
+
+    def test_the_scripts_only_import_each_other_and_the_standard_library(self):
+        """No third-party runtime dependency can creep in unnoticed: the skill
+        is installed by symlink, so nothing would install one for it."""
+        allowed = {p.stem for p in self.scripts()} | set(sys.stdlib_module_names)
+        for path in self.scripts():
+            assert self.imported_roots(path) <= allowed, path.name
 
 
 class TestInstall:
@@ -169,9 +209,30 @@ class TestDispatch:
         assert cli.main(["nope"]) == 2
         assert "unknown command" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("command", ["templates", "git", "summary", "install", "uninstall"])
-    def test_every_documented_command_is_dispatchable(self, command):
-        assert command in (cli.__doc__ or "")
+    @pytest.mark.parametrize("command", ["install", "uninstall"])
+    def test_every_documented_command_is_dispatchable(self, command, skills):
+        """Dispatched, not merely mentioned.
+
+        This used to assert the command appeared in the module docstring, which
+        `git` passed on the strength of the word "gitignore". Running it is the
+        only check that means anything.
+        """
+        assert cli.main([command, "--dest", str(skills)]) == 0
+
+    @pytest.mark.parametrize(
+        ("command", "script"),
+        [("templates", "templates.py"), ("git", "gitwork.py"), ("summary", "summary.py")],
+    )
+    def test_a_command_that_moved_into_the_skill_says_where_it_went(self, command, script, capsys):
+        """These were subcommands until the work moved into the skill.
+
+        A bare "unknown command" would be true and useless: the work still
+        exists, and the person typing this wants to know where.
+        """
+        assert cli.main([command]) == 2
+        err = capsys.readouterr().err
+        assert script in err
+        assert "not a command of this installer" in err
 
     def test_install_and_uninstall_round_trip_through_main(self, skills):
         assert cli.main(["install", "--dest", str(skills)]) == 0
