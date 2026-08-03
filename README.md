@@ -9,9 +9,16 @@ skill: the CLI makes every mechanical decision, and `SKILL.md` tells an agent ho
 to drive it.
 
 ```bash
-pipx install manage-gitignore     # or: pip install manage-gitignore
-manage-gitignore install-skill    # copies SKILL.md into ~/.claude/skills/
+pipx install manage-gitignore   # or: pip install manage-gitignore
+manage-gitignore install        # symlink the skill into ~/.claude/skills/
 ```
+
+`install` links rather than copies, so upgrading the package upgrades the skill —
+no second step, and no chance of the two drifting. `manage-gitignore uninstall`
+removes that link again, and refuses to touch anything it did not create: a real
+directory, or a link pointing somewhere else, is left alone unless you pass
+`--force`. Both take `--dest` if your skills directory is not `~/.claude/skills`.
+Removing the package itself is `pipx uninstall manage-gitignore`.
 
 ## Using the CLI directly
 
@@ -43,7 +50,7 @@ where a wrong answer is an exit code rather than a plausible sentence.
 | `src/manage_gitignore/gitwork.py` | git: status/diff, commit, push planning, push, facts |
 | `src/manage_gitignore/summary.py` | the end-of-run summary format |
 | `src/manage_gitignore/shared.py` | one sanitiser, one no-follow reader, one JSON contract |
-| `src/manage_gitignore/cli.py` | the console script; a dispatcher with no logic of its own |
+| `src/manage_gitignore/cli.py` | the console script: dispatch, plus `install`/`uninstall` |
 | `skill/SKILL.md` | the agent-facing procedure |
 | `skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
 | `tests/` | pytest suite |

@@ -1,4 +1,4 @@
-.PHONY: help test lint format typecheck verify build install-skill clean
+.PHONY: help test lint format typecheck verify build install uninstall clean
 
 help:
 	@echo "test           run the test suite"
@@ -7,7 +7,8 @@ help:
 	@echo "typecheck      mypy"
 	@echo "verify         lint + typecheck + test  (run before shipping a change)"
 	@echo "build          sdist + wheel into dist/"
-	@echo "install-skill  copy the skill into ~/.claude/skills/"
+	@echo "install        symlink the skill into ~/.claude/skills/"
+	@echo "uninstall      remove that symlink again"
 
 test:
 	python3 -m pytest
@@ -28,8 +29,11 @@ verify: lint typecheck test
 build:
 	python3 -m build
 
-install-skill:
-	python3 -m manage_gitignore.cli install-skill --force
+install:
+	python3 -m manage_gitignore.cli install
+
+uninstall:
+	python3 -m manage_gitignore.cli uninstall
 
 clean:
 	rm -rf dist build .pytest_cache .mypy_cache .ruff_cache
