@@ -1,0 +1,107 @@
+name: Release
+
+# Tag-driven: pushing v* builds the distributions, attaches them to a GitHub
+# Release, and publishes to PyPI via Trusted Publishing (OIDC) — no API token is
+# stored anywhere in this repository.
+#
+# One-time PyPI setup before the first release, at
+# https://pypi.org/manage/account/publishing/ :
+#   PyPI project name  manage-gitignore
+#   Owner              grammy-jiang
+#   Repository         manage-gitignore
+#   Workflow           release.yml
+#   Environment        pypi
+# Until that publisher exists the `pypi` job fails; `build` and `github-release`
+# still succeed, so a tag always produces downloadable artifacts.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]' build
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+          git config --global init.defaultBranch main
+
+      - name: Verify before building
+        # A tag must not ship what CI would have rejected.
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy
+          pytest
+
+      - name: Check the tag matches the packaged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match project version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check metadata
+        run: pipx run twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/manage-gitignore
+    permissions:
+      id-token: write # the OIDC token Trusted Publishing exchanges; no secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
