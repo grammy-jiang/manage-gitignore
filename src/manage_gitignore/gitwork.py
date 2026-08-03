@@ -443,7 +443,22 @@ def cmd_commit(args: argparse.Namespace) -> int:
     if problem:
         # Still JSON on stdout: the caller needs the hash to report (and undo)
         # the commit that should not have happened.
-        emit({"hash": sha, "files": files, "only_gitignore": False})
+        emit(
+            {
+                "hash": sha,
+                "files": files,
+                "only_gitignore": False,
+                "verdict": "touched-extra-files",
+                "remedy": problem,
+                # What Step 5 must record. Derived here so the doc does not carry
+                # a second copy of the same four-way mapping.
+                "record_choice": "not committed",
+                "record_note": (
+                    f"commit {sha} was made but touched extra files; not recorded "
+                    "— see the reported undo command"
+                ),
+            }
+        )
         print(f"gitwork: {problem}", file=sys.stderr)
         return EXIT_BAD_COMMIT
     if staged_oid:
@@ -451,7 +466,21 @@ def cmd_commit(args: argparse.Namespace) -> int:
         # different bytes under the same path.
         rc_oid, committed_oid, _ = git(repo, "rev-parse", f"{sha}:{TARGET}")
         if rc_oid != 0 or committed_oid != staged_oid:
-            emit({"hash": sha, "files": files, "only_gitignore": True, "content_matches": False})
+            emit(
+                {
+                    "hash": sha,
+                    "files": files,
+                    "only_gitignore": True,
+                    "content_matches": False,
+                    "verdict": "content-mismatch",
+                    "remedy": f"Do NOT push; {undo_hint(repo)}.",
+                    "record_choice": "not committed",
+                    "record_note": (
+                        f"commit {sha} recorded different content than was verified; "
+                        "not recorded — see the reported undo command"
+                    ),
+                }
+            )
             print(
                 f"gitwork: commit {sha} recorded {TARGET} with content that is not what "
                 f"this run wrote and verified. Do NOT push; {undo_hint(repo)}.",
@@ -468,6 +497,8 @@ def cmd_commit(args: argparse.Namespace) -> int:
         "subject": subject,
         "files": files,
         "only_gitignore": True,
+        "content_matches": True,
+        "verdict": "ok",
         "untouched_count": n,
         "untouched": phrase,
     }
@@ -486,6 +517,59 @@ def cmd_commit(args: argparse.Namespace) -> int:
 
 
 # ── push ────────────────────────────────────────────────────────────────────
+# What each action means for a human, and whether `push` will do anything. These
+# lived as two 9-row tables in SKILL.md -- restating, in prose, a decision this
+# function already made. One authority; the doc reads `guidance` and `permits_push`.
+ACTION_GUIDANCE = {
+    "fast-forward": "it would go to {dest}",
+    "stop-up-to-date": "{dest} already has this commit; nothing to push. Not a failure.",
+    "no-upstream": "first push for this branch; it would go to {dest}",
+    "diverged": (
+        "{dest} has commits this branch does not. Pushing needs a force-push "
+        "decision that can drop them -- see references/push-safety.md."
+    ),
+    "stop-behind-only": (
+        "{dest} is ahead and there is nothing new to send. Once this commit "
+        "lands the branch becomes diverged, and pushing would then need a "
+        "force-push decision that can drop remote commits."
+    ),
+    "stop-no-remote": "no remote is configured, so a push has nowhere to go",
+    "stop-detached-head": "not on a branch (detached HEAD); check one out first",
+    "stop-fetch-failed": "could not reach the remote; check network and auth",
+    "stop-compare-failed": "could not read ahead/behind, so no push decision is safe",
+    "stop-not-a-repo": "not a git work tree",
+}
+PUSH_PERMITTED = {"fast-forward", "no-upstream", "diverged"}
+
+
+def destination(plan: PushPlan) -> str:
+    """Where a push would land, always naming the URL and not just a nickname.
+
+    An upstream plan carries one remote; a no-upstream plan carries a candidate
+    per remote, and may not have settled on one at all.
+    """
+    urls = plan.get("remote_urls") or {}
+    remote = plan.get("remote")
+    if plan.get("merge_ref"):  # an upstream exists: one destination, fully known
+        branch = str(plan["merge_ref"]).removeprefix("refs/heads/")
+        url = plan.get("remote_url")
+        return f"{remote}/{branch}" + (f" ({url})" if url else "")
+    if remote:  # first push, remote already settled
+        return f"{remote}" + (f" ({urls[remote]})" if remote in urls else "")
+    if urls:  # several candidates and no origin: nothing is settled yet
+        listed = ", ".join(f"{n} ({u})" for n, u in sorted(urls.items()))
+        return f"one of {listed} — not settled yet, a follow-up question will confirm"
+    return "the remote"
+
+
+def describe(plan: PushPlan) -> PushPlan:
+    """Annotate a plan with the sentence to say and whether a push can happen."""
+    action = str(plan.get("action", ""))
+    plan["guidance"] = ACTION_GUIDANCE.get(action, action).format(dest=destination(plan))
+    plan["permits_push"] = action in PUSH_PERMITTED
+    return plan
+
+
 def push_plan(repo: str) -> PushPlan:
     """Classify the push situation. `action` names the ONE permitted next step.
 
@@ -584,7 +668,7 @@ def push_plan(repo: str) -> PushPlan:
 
 
 def cmd_push_plan(args: argparse.Namespace) -> int:
-    plan = push_plan(args.dir)
+    plan = describe(push_plan(args.dir))
     emit(plan)
     return 0
 
@@ -619,7 +703,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     """
     repo = args.dir
     refuse_facts_alias(repo, args.facts)
-    plan = push_plan(repo)
+    plan = describe(push_plan(repo))
     action = plan["action"]
 
     if action.startswith("stop-"):

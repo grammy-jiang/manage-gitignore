@@ -418,6 +418,80 @@ class TestCommit:
 
 
 # ── push planning ───────────────────────────────────────────────────────────
+class TestGuidance:
+    """SKILL.md says "say the plan's guidance" instead of carrying a 9-row table,
+    so every action the tool can return must produce a usable sentence."""
+
+    def test_every_action_has_guidance(self):
+        for action in gw.ACTION_GUIDANCE:
+            plan = gw.describe({"action": action})
+            assert plan["guidance"]
+            assert "{dest}" not in plan["guidance"]
+
+    def test_no_action_is_missing_from_the_table(self, remote_pair, repo):
+        """A new action with no entry would fall through to its own bare name."""
+        for r in (repo, remote_pair[0]):
+            action = gw.push_plan(str(r))["action"]
+            assert action in gw.ACTION_GUIDANCE
+
+    def test_permits_push_matches_what_push_will_attempt(self):
+        assert gw.describe({"action": "fast-forward"})["permits_push"] is True
+        assert gw.describe({"action": "diverged"})["permits_push"] is True
+        assert gw.describe({"action": "stop-up-to-date"})["permits_push"] is False
+        assert gw.describe({"action": "stop-behind-only"})["permits_push"] is False
+
+    def test_an_upstream_destination_names_the_branch_and_url(self, remote_pair):
+        work, bare = remote_pair
+        plan = gw.describe(gw.push_plan(str(work)))
+        assert "origin/main" in plan["guidance"]
+        assert str(bare) in plan["guidance"]
+
+    def test_a_first_push_destination_names_the_url(self, repo, make_bare):
+        bare = make_bare("only")
+        git(repo, "remote", "add", "only", str(bare))
+        plan = gw.describe(gw.push_plan(str(repo)))
+        assert plan["action"] == "no-upstream"
+        assert str(bare) in plan["guidance"]
+
+    def test_an_unsettled_destination_says_so(self, repo, make_bare):
+        """Several remotes, no origin: the tool must not imply one destination."""
+        for name in ("alpha", "beta"):
+            git(repo, "remote", "add", name, str(make_bare(name)))
+        plan = gw.describe(gw.push_plan(str(repo)))
+        assert plan["remote"] is None
+        assert "not settled yet" in plan["guidance"]
+
+
+class TestCommitVerdict:
+    """SKILL.md reads `verdict` instead of enumerating four outcomes twice."""
+
+    def test_a_clean_commit_reports_ok(self, repo, run_script, tmp_path):
+        write_gitignore(repo)
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        data = json.loads(out.stdout)
+        assert data["verdict"] == "ok"
+        assert data["content_matches"] is True
+
+    def test_an_over_scoped_commit_says_what_to_record(self, repo, run_script, tmp_path):
+        write_gitignore(repo)
+        (repo / "other.txt").write_text("x\n", encoding="utf-8")
+        hooks = repo / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\ngit add other.txt\n", encoding="utf-8")
+        hook.chmod(0o755)
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        data = json.loads(out.stdout)
+        assert data["verdict"] == "touched-extra-files"
+        assert data["record_choice"] == "not committed"
+        assert "touched extra files" in data["record_note"]
+        assert data["remedy"]
+
+
 class TestSafeMergeRef:
     """branch.<name>.merge is repo config, and it builds a push refspec."""
 

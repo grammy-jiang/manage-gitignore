@@ -302,6 +302,8 @@ class PushPlan(TypedDict, total=False):
     would_add: list[str]
     suspicious_characters: bool
     error: str
+    guidance: str  # one sentence to tell the user; see gitwork.ACTION_GUIDANCE
+    permits_push: bool  # whether `push` will attempt anything at all
 
 
 class RecommendReport(TypedDict, total=False):
