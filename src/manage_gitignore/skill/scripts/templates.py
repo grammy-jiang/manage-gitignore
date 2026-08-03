@@ -51,7 +51,7 @@ import time
 from io import BufferedReader
 from typing import NoReturn, NotRequired, TypedDict, cast
 
-from manage_gitignore.shared import (
+from shared import (
     Facts,
     RecommendedTemplate,
     RecommendReport,

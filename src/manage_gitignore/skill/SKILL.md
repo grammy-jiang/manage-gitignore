@@ -16,19 +16,26 @@ rules** outside it, preserved and de-duplicated against the fresh block.
 
 ## Division of labour
 
-**Anything a program can decide, a program decides.** The `manage-gitignore`
-command owns every mechanical step — scanning, merging, verifying, all summary
-numbers, tracked-vs-untracked, the diff, the commit, and what a push may do.
+**Anything a program can decide, a program decides.** The scripts in `scripts/`
+own every mechanical step — scanning, merging, verifying, all summary numbers,
+tracked-vs-untracked, the diff, the commit, and what a push may do.
 
 **Yours:** ask the user, judge their answers, write the commit message, relay
 what the tools say. That is all. Never re-derive a tool's answer by eye, never
 reformat its output into your own numbers, and never run `git add`/`commit`/`push`
-yourself — `manage-gitignore git` is the only path to a mutation, and it fails
+yourself — `scripts/gitwork.py` is the only path to a mutation, and it fails
 closed.
 
-`<repo>` below is the repository being worked on. If `manage-gitignore` is not on
-PATH, say so and stop; do not fall back to hand-written git or a hand-written
-`.gitignore`.
+## Placeholders
+
+`<skill-dir>` is the directory holding this SKILL.md — usually
+`~/.claude/skills/manage-gitignore`. `<repo>` is the repository being worked on.
+Substitute both; never run a command with the angle brackets still in it.
+
+The scripts need only Python 3.11+, `git`, and `curl`. They import each other
+from their own directory, so they run from wherever the skill is installed, with
+nothing to install first. If one is missing, say so and stop; do not fall back to
+hand-written git or a hand-written `.gitignore`.
 
 **Any non-zero exit stops that action** — report it verbatim. The one exception
 is Step 3's exit 3, documented there.
@@ -41,7 +48,7 @@ say which confirmation is needed. Never assume an answer.
 If the user only wants to *see* what a repo ignores:
 
 ```bash
-manage-gitignore templates --dir "<repo>" --detect
+python3 "<skill-dir>/scripts/templates.py" --dir "<repo>" --detect
 ```
 
 Relay it and stop. Nothing is written, so there is nothing to review or commit.
@@ -49,7 +56,7 @@ Relay it and stop. Nothing is written, so there is nothing to review or commit.
 ## Step 1 — Scan
 
 ```bash
-manage-gitignore templates --dir "<repo>" --recommend
+python3 "<skill-dir>/scripts/templates.py" --dir "<repo>" --recommend
 ```
 
 Returns JSON: `always_on` (fixed policy), `recommended` (`[{name, reason}]`,
@@ -87,7 +94,7 @@ fails loudly rather than reporting `0` for an unreachable API. To browse, drop
 ## Step 3 — Write
 
 ```bash
-manage-gitignore templates --dir "<repo>" --force \
+python3 "<skill-dir>/scripts/templates.py" --dir "<repo>" --force \
   --facts-out "<facts.json>" --templates-file "<templates.txt>"
 ```
 
@@ -126,7 +133,7 @@ Never stage, commit, or suggest committing any other file.
 ### 1. Show the diff
 
 ```bash
-manage-gitignore git --dir "<repo>" status
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" status
 ```
 
 It picks the right command for the file's state and returns the real diff — show
@@ -160,7 +167,7 @@ change and not an intention:
 - **Name where a push would go**, from the tool rather than by re-deriving it:
 
   ```bash
-  manage-gitignore git --dir "<repo>" push-plan
+  python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
   ```
 
   Say its `guidance` sentence — it already names the destination *and its URL*,
@@ -177,7 +184,7 @@ Only on *Commit + push* or *Commit only*. Write **the exact text shown in item
 2** to a `mktemp` file — do not redraft it — then:
 
 ```bash
-manage-gitignore git --dir "<repo>" commit \
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" commit \
   --message-file "<msgfile>" --facts "<facts.json>"
 ```
 
@@ -201,7 +208,7 @@ you found it. Report it and stop.
 Only if the user chose a push option.
 
 ```bash
-manage-gitignore git --dir "<repo>" push-plan
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
 ```
 
 - `permits_push: false` → report `guidance` and go to Step 5. None of these is an
@@ -211,7 +218,7 @@ manage-gitignore git --dir "<repo>" push-plan
 - otherwise:
 
 ```bash
-manage-gitignore git --dir "<repo>" push --facts "<facts.json>"
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push --facts "<facts.json>"
 ```
 
 `push` recomputes the plan and executes only what it permits, by explicit
@@ -229,7 +236,7 @@ no push recorded.
 ## Step 5 — Summary
 
 ```bash
-manage-gitignore git --dir "<repo>" facts --facts "<facts.json>" \
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
   --choice "commit + push" --hash "<hash>" --note "<why, when needed>"
 ```
 
@@ -250,7 +257,7 @@ The commit and push lines are already in it: `commit --facts` and `push --facts`
 wrote them.
 
 ```bash
-manage-gitignore summary "<facts.json>"
+python3 "<skill-dir>/scripts/summary.py" "<facts.json>"
 ```
 
 That output *is* the closing summary; do not hand-format a second one. Then

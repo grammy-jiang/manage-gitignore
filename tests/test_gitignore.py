@@ -14,8 +14,8 @@ import time
 
 import pytest
 
+import templates as gi
 from conftest import API, api_block
-from manage_gitignore import templates as gi
 
 
 # ── response validation (fails closed) ──────────────────────────────────────

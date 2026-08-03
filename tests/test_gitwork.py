@@ -13,8 +13,8 @@ import subprocess
 
 import pytest
 
+import gitwork as gw
 from conftest import git, init_repo, remote_head
-from manage_gitignore import gitwork as gw
 
 
 @pytest.fixture

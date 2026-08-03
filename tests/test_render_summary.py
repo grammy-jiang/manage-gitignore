@@ -14,8 +14,8 @@ import sys
 
 import pytest
 
+import summary as rs
 from conftest import MODULE, REPO
-from manage_gitignore import summary as rs
 
 FULL_FACTS = {
     "scan": {

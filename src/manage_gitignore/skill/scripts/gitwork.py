@@ -33,7 +33,7 @@ import sys
 from collections.abc import Mapping
 from typing import NoReturn, cast
 
-from manage_gitignore.shared import (
+from shared import (
     Facts,
     PushPlan,
     clean,

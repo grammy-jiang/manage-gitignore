@@ -1,15 +1,14 @@
-"""The `manage-gitignore` console script.
-
-A thin dispatcher: each subcommand hands straight to the module that owns that
-decision, so the CLI adds no logic of its own and nothing here can drift from
-what the tests exercise.
-
-    manage-gitignore templates --dir REPO --recommend
-    manage-gitignore git       --dir REPO status
-    manage-gitignore summary   FACTS.json
+"""The `manage-gitignore` console script: an installer, and nothing else.
 
     manage-gitignore install     symlink the skill into ~/.claude/skills
     manage-gitignore uninstall   remove that symlink again
+
+The work itself is not here. `skill/scripts/` holds it, beside the SKILL.md
+that drives it, and those scripts are run by path and import each other by
+plain module name -- so they need this package installed no more than any other
+skill's bundled scripts do. Installing is the one job that cannot be done from
+inside the skill directory, because it is what puts the skill directory where
+Claude Code will look. That is the whole reason this package exists.
 """
 
 from __future__ import annotations
@@ -24,6 +23,11 @@ from manage_gitignore import __version__
 
 SKILL_NAME = "manage-gitignore"
 DEFAULT_SKILLS_DIR = Path.home() / ".claude" / "skills"
+
+# These were subcommands here until the work moved into the skill. Anyone with
+# the old call in a script or in their fingers gets told where it went, which is
+# worth more than a bare "unknown command".
+MOVED_TO_SCRIPTS = {"templates": "templates.py", "git": "gitwork.py", "summary": "summary.py"}
 
 
 def skill_source() -> Path:
@@ -165,29 +169,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if argv else 2
 
     command, rest = argv[0], argv[1:]
-    # Each module owns its own argument parsing; sys.argv is rewritten so their
-    # usage strings and error messages stay accurate under the console script.
-    if command == "templates":
-        from manage_gitignore import templates
-
-        sys.argv = ["manage-gitignore templates", *rest]
-        templates.main()
-        return 0
-    if command == "git":
-        from manage_gitignore import gitwork
-
-        sys.argv = ["manage-gitignore git", *rest]
-        return gitwork.main()
-    if command == "summary":
-        from manage_gitignore import summary
-
-        sys.argv = ["manage-gitignore summary", *rest]
-        summary.main()
-        return 0
     if command == "install":
         return cmd_install(rest)
     if command == "uninstall":
         return cmd_uninstall(rest)
+
+    if command in MOVED_TO_SCRIPTS:
+        script = MOVED_TO_SCRIPTS[command]
+        print(
+            f"manage-gitignore: {command!r} is not a command of this installer.\n"
+            f"The scripts do that work, and are run by path:\n"
+            f"    python3 {DEFAULT_SKILLS_DIR / SKILL_NAME / 'scripts' / script} ...",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"manage-gitignore: unknown command {command!r}", file=sys.stderr)
     print(__doc__, file=sys.stderr)

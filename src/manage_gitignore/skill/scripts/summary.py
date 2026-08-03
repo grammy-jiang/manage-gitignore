@@ -55,7 +55,7 @@ import sys
 from collections.abc import Sequence
 from typing import NoReturn
 
-from manage_gitignore.shared import (  # one sanitiser, shared by every tool in this skill
+from shared import (  # one sanitiser, shared by every tool in this skill
     Facts,
     clean,
     read_bytes_or_die,
