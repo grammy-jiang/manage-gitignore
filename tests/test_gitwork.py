@@ -8,6 +8,7 @@ versions of this file; those say so in the docstring.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
@@ -1428,3 +1429,164 @@ def test_repos_are_isolated(tmp_path):
     assert git(a, "rev-list", "--count", "HEAD").stdout.strip() == "2"
     assert git(b, "rev-list", "--count", "HEAD").stdout.strip() == "1"
     assert "a-only" not in git(b, "log", "--oneline").stdout
+
+
+# ── committing only this run's own work ─────────────────────────────────────
+COMMITTED = "# mine\nsecret/\n"
+REBUILT = "# Created by x\nblock/\n# End of x\n\n# mine\nsecret/\n"
+WITH_USER_LINE = REBUILT + "theirs.txt\n"
+
+
+@pytest.fixture
+def carried(repo, tmp_path):
+    """A repo mid-run: .gitignore committed, then rebuilt with the user's own
+    uncommitted line re-applied on top, exactly as gitignore.py leaves it."""
+    write_gitignore(repo, COMMITTED)
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "base")
+    write_gitignore(repo, WITH_USER_LINE)
+    facts = tmp_path / "carry.json"
+    facts.write_text(
+        json.dumps(
+            {
+                "merge": {"esc_bytes": 0},
+                "internal": {
+                    "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
+                    "worktree_sha256": hashlib.sha256(WITH_USER_LINE.encode()).hexdigest(),
+                    "pending_state": "modified",
+                    "commit_text": REBUILT,
+                    "restore_worktree": WITH_USER_LINE,
+                    "restore_index": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return repo, facts
+
+
+class TestCommitCarriesTheUsersChange:
+    """The commit holds this run's rebuild; the user gets their edit back.
+
+    Defect this pins: a line the user had not committed was swept into this
+    run's commit and reported as its work.
+    """
+
+    def run(self, repo, facts, run_script, tmp_path):
+        return run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "commit",
+            "--message-file",
+            str(msg_file(tmp_path)),
+            "--facts",
+            str(facts),
+        )
+
+    def test_the_commit_holds_the_rebuild_without_the_users_line(
+        self, carried, run_script, tmp_path
+    ):
+        repo, facts = carried
+        out = self.run(repo, facts, run_script, tmp_path)
+        assert out.returncode == 0, out.stderr
+        committed = git(repo, "show", "HEAD:.gitignore").stdout
+        assert committed == REBUILT
+        assert "theirs.txt" not in committed
+
+    def test_the_work_tree_gets_the_users_line_back(self, carried, run_script, tmp_path):
+        repo, facts = carried
+        self.run(repo, facts, run_script, tmp_path)
+        assert (repo / ".gitignore").read_text(encoding="utf-8") == WITH_USER_LINE
+
+    def test_it_is_uncommitted_again_afterwards(self, carried, run_script, tmp_path):
+        """Not just present -- present as the user's own pending change."""
+        repo, facts = carried
+        self.run(repo, facts, run_script, tmp_path)
+        assert gw.file_state(str(repo)) == "modified"
+
+    def test_a_staged_change_comes_back_staged(self, repo, run_script, tmp_path):
+        """Staged and unstaged are told apart, not flattened into one."""
+        write_gitignore(repo, COMMITTED)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        staged_version = REBUILT + "staged.txt\n"
+        worktree_version = staged_version + "unstaged.txt\n"
+        write_gitignore(repo, worktree_version)
+        facts = tmp_path / "c.json"
+        facts.write_text(
+            json.dumps(
+                {
+                    "merge": {"esc_bytes": 0},
+                    "internal": {
+                        "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
+                        "worktree_sha256": hashlib.sha256(worktree_version.encode()).hexdigest(),
+                        "pending_state": "staged",
+                        "commit_text": REBUILT,
+                        "restore_worktree": worktree_version,
+                        "restore_index": staged_version,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = self.run(repo, facts, run_script, tmp_path)
+        assert out.returncode == 0, out.stderr
+        assert git(repo, "show", "HEAD:.gitignore").stdout == REBUILT
+        assert git(repo, "show", ":.gitignore").stdout == staged_version
+        assert (repo / ".gitignore").read_text(encoding="utf-8") == worktree_version
+        assert gw.file_state(str(repo)) == "staged"
+
+    def test_a_work_tree_that_moved_is_refused_rather_than_overwritten(
+        self, carried, run_script, tmp_path
+    ):
+        """The restore would otherwise clobber whatever arrived in between."""
+        repo, facts = carried
+        write_gitignore(repo, "something else entirely\n")
+        out = self.run(repo, facts, run_script, tmp_path)
+        assert out.returncode != 0
+        assert "changed since it was written" in out.stderr
+        assert (repo / ".gitignore").read_text(encoding="utf-8") == "something else entirely\n"
+
+    def test_a_refused_commit_still_gives_the_file_back(self, carried, run_script, tmp_path):
+        """The restore is in a finally: a failed commit must not cost the edit."""
+        repo, facts = carried
+        empty = tmp_path / "empty.txt"
+        empty.write_text("   \n", encoding="utf-8")
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "commit",
+            "--message-file",
+            str(empty),
+            "--facts",
+            str(facts),
+        )
+        assert out.returncode != 0
+        assert (repo / ".gitignore").read_text(encoding="utf-8") == WITH_USER_LINE
+
+
+class TestStatusShowsWhatWillBeCommitted:
+    def test_the_diff_excludes_the_users_own_pending_line(self, carried, run_script):
+        """Without --facts this would diff the work tree, which holds it."""
+        repo, facts = carried
+        out = run_script("gitwork.py", "--dir", str(repo), "status", "--facts", str(facts))
+        assert out.returncode == 0, out.stderr
+        data = json.loads(out.stdout)
+        assert "theirs.txt" not in data["diff"]
+        assert "block/" in data["diff"]
+
+    def test_without_facts_it_still_reports_the_work_tree(self, carried, run_script):
+        """Unchanged behaviour for every run that carried nothing."""
+        repo, _ = carried
+        out = run_script("gitwork.py", "--dir", str(repo), "status")
+        assert out.returncode == 0, out.stderr
+        assert "theirs.txt" in json.loads(out.stdout)["diff"]
+
+    def test_facts_may_not_alias_the_gitignore_here_either(self, carried, run_script):
+        repo, _ = carried
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "status", "--facts", str(repo / ".gitignore")
+        )
+        assert out.returncode != 0

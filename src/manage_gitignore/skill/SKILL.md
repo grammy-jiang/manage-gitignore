@@ -117,13 +117,9 @@ set exact, every custom rule present, no ANSI, bidi or zero-width characters.
   rejected names only*, quoting the near matches it printed (`"pythonn" not
   found — did you mean python?`), write a fresh `<templates.txt>`, and re-run.
   **Retry once.** If that fails, report the near matches and stop.
-- **exit 4, `.gitignore` already has uncommitted changes** — nothing was written,
-  and this is the user's call, not a retry. Relay the message, show them what is
-  already there (`git diff HEAD -- .gitignore`), and stop. They commit it, stash
-  it, or discard it; then the run starts again from Step 1. **Never work around
-  it** — not by committing their change for them, not by stashing on their
-  behalf. This run may only commit what this run wrote, and a staged or unstaged
-  edit sitting in that file is not that.
+- **exit 4, `.gitignore` is staged for deletion** — the user's pending change is
+  "this file should be gone", and no rebuild honours that. Relay it and stop.
+  They finish the deletion or unstage it; then the run starts again from Step 1.
 - **anything else** — nothing usable was written. Report it and end the run: no
   Step 4, and no Step 5 summary for a run that produced no file.
 
@@ -132,6 +128,18 @@ template that covers it, and any `Review before committing` lines — negations
 (`!…`, which un-ignore a path) or patterns broad enough to ignore the tree.
 **Those flags cover the template block only, never the carried-over custom
 rules**, so their absence certifies nothing about the rest of the diff.
+
+**If it says `Carried across your uncommitted change`**, `.gitignore` already had
+an edit of the user's in it. The rebuild was based on the *committed* file, so
+the commit will be this run's work alone; their edit was re-applied on top in the
+work tree and will be put back staged or unstaged exactly as it was. Relay every
+`+ kept` / `- honoured` line, and relay a `!` line about the template block
+loudly — that part of their edit could not be carried across, because the block
+is regenerated wholesale.
+
+From here the file on disk is deliberately **not** what will be committed. Do not
+diff it by hand and do not describe it as the change; Step 4's `status` reports
+the committed version, and it is the one to show.
 
 ## Step 4 — Review, commit, push (`.gitignore` ONLY)
 
@@ -143,8 +151,12 @@ work. That is what makes it honest to commit the whole file.
 ### 1. Show the diff
 
 ```bash
-python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" status
+python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" status --facts "<facts.json>"
 ```
+
+**Always pass `--facts`.** When Step 3 carried an uncommitted change across, the
+work tree holds that change too; without the facts file this would diff the work
+tree and show the user their own edit as if this run had made it.
 
 It picks the right command for the file's state and returns the real diff — show
 it. For an `untracked` file that diff is a one-line stub, so also show the file

@@ -321,6 +321,17 @@ class InternalFacts(TypedDict, total=False):
     """Tool-to-tool handshake values. Never rendered; not a display contract."""
 
     written_sha256: str
+    # Present only when .gitignore already carried an uncommitted change. The
+    # work tree then holds MORE than this run wrote -- this run's rebuild plus
+    # the user's own edit re-applied on top -- so the commit cannot simply take
+    # whatever is on disk. commit_text is what this run wrote and all it may
+    # commit; the two restore_* values put the user's change back afterwards,
+    # staged and unstaged kept apart exactly as they were found.
+    pending_state: str  # the file_state seen before the run: staged | modified
+    worktree_sha256: str  # the file left on disk, which is NOT written_sha256 here
+    commit_text: str
+    restore_worktree: str
+    restore_index: str  # "" when nothing was staged, i.e. nothing to restore
 
 
 class Facts(TypedDict, total=False):

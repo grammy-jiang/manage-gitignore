@@ -145,10 +145,16 @@ product, not a refactor.
 - the file is re-read and verified after writing (block intact, custom rules
   present, no ANSI or bidi characters) before success is reported
 - a `.gitignore` created or edited *during* the fetch is detected, not clobbered
-- a `.gitignore` that already carries an uncommitted change, staged or unstaged,
-  stops the run before the fetch and before the overwrite — a run may only commit
-  what that run wrote, and an unstaged edit is the one copy git cannot give back.
-  An untracked file is not a refusal: a first run is what this tool is for
+- a run commits only what that run wrote. When `.gitignore` already carries an
+  uncommitted change, the rebuild is based on the **committed** file, and the
+  user's edit is re-applied on top in the work tree and put back staged or
+  unstaged exactly as it was found — `git status` reads the same before and
+  after. The work tree therefore holds more than the commit does, which is why
+  `status` and `commit` both take `--facts`
+- re-applying is done at the level of the custom rules, because this run owns the
+  template block and the user owns everything outside it. A whole-file three-way
+  merge conflicts on a deletion; a rule-level one does not. An edit *inside* the
+  block cannot be carried across and is reported rather than silently dropped
 - `commit` refuses a file whose checksum no longer matches what was verified, and
   proves the committed blob is that content — not just that the path matched
 - a commit touching anything besides `.gitignore` is reported, never pushed
