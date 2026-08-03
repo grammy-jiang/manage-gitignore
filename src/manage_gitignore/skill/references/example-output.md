@@ -43,8 +43,8 @@ NET
 ## Reading it
 
 - **SCAN** — what was found before anything changed: whether it is a git repo,
-  whether a `.gitignore` already existed, and how it was composed (template count
-  + custom-rule count).
+  whether a `.gitignore` already existed, and how it was composed (template
+  count + custom-rule count).
 - **TEMPLATES** — every template grouped by *why* it is in the set, so the choice
   is auditable: `always-on` (the fixed defaults), `recommended` (each with the
   marker file that triggered it), `carried-over` (from the previous file),
