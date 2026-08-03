@@ -1185,6 +1185,237 @@ class TestCli:
         assert "not a git work tree" in out.stderr
 
 
+def hook(repo, body: str) -> None:
+    """Install an executable pre-commit hook.
+
+    A hook is the realistic way the committed bytes end up different from the
+    bytes this run verified -- lint-staged, a formatter, an over-eager
+    `git add -A`. The gates exist for it, so it is what tests them.
+    """
+    path = repo / ".git" / "hooks" / "pre-commit"
+    path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+class TestCommitFailureLeavesNothingStaged:
+    """`add` has already run by the time `commit` can fail. Leaving now would
+    strand .gitignore in the index in a state the caller did not create."""
+
+    def test_a_rejecting_hook_unstages_the_file_again(self, repo, run_script, tmp_path):
+        write_gitignore(repo)
+        hook(repo, "exit 1\n")
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert out.returncode == 1
+        assert "commit failed" in out.stderr
+        assert "was unstaged again" in out.stderr
+        assert git(repo, "diff", "--cached", "--name-only").stdout.split() == []
+
+    def test_the_failure_message_carries_the_hook_output(self, repo, run_script, tmp_path):
+        write_gitignore(repo)
+        hook(repo, "echo 'policy: no ignores today' >&2\nexit 1\n")
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert out.returncode == 1
+        assert "policy: no ignores today" in out.stderr
+
+    def test_nothing_is_committed(self, repo, run_script, tmp_path):
+        write_gitignore(repo)
+        before = git(repo, "rev-list", "--count", "HEAD").stdout.strip()
+        hook(repo, "exit 1\n")
+        run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert git(repo, "rev-list", "--count", "HEAD").stdout.strip() == before
+
+
+class TestCommittedContentIsVerified:
+    """The file list is not the content. A hook can commit different bytes under
+    the same path, and `.gitignore only` would still be true of that commit."""
+
+    def test_a_hook_that_rewrites_the_file_is_caught(self, repo, run_script, tmp_path):
+        write_gitignore(repo, "node_modules/\n")
+        hook(repo, "printf 'SOMETHING-ELSE/\\n' > .gitignore\ngit add .gitignore\n")
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert out.returncode == 2, out.stdout
+        data = json.loads(out.stdout)
+        assert data["verdict"] == "content-mismatch"
+        assert data["content_matches"] is False
+        assert data["record_choice"] == "not committed"
+
+    def test_it_says_do_not_push_and_offers_an_undo(self, repo, run_script, tmp_path):
+        write_gitignore(repo, "node_modules/\n")
+        hook(repo, "printf 'SOMETHING-ELSE/\\n' > .gitignore\ngit add .gitignore\n")
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert "Do NOT push" in out.stderr
+        assert "Do NOT push" in json.loads(out.stdout)["remedy"]
+
+    def test_an_untouched_commit_reports_a_matching_verdict(self, repo, run_script, tmp_path):
+        """The same gate, passing: the ok verdict must mean the check ran."""
+        write_gitignore(repo)
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert out.returncode == 0, out.stderr
+        data = json.loads(out.stdout)
+        assert data["verdict"] == "ok"
+        assert data["content_matches"] is True
+
+
+class TestCommitRecordsIntoFacts:
+    def test_the_untouched_phrase_reaches_the_facts_file(
+        self, repo, run_script, tmp_path, facts_file
+    ):
+        write_gitignore(repo)
+        (repo / "other.txt").write_text("x\n", encoding="utf-8")
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "commit",
+            "--message-file",
+            str(msg_file(tmp_path)),
+            "--facts",
+            str(facts_file),
+        )
+        assert out.returncode == 0, out.stderr
+        commit = json.loads(facts_file.read_text(encoding="utf-8"))["commit"]
+        assert commit["untouched"] == "1 other file"
+        assert commit["scope"]
+        assert commit["hash"]
+
+    def test_no_untouched_key_when_the_tree_was_otherwise_clean(
+        self, repo, run_script, tmp_path, facts_file
+    ):
+        write_gitignore(repo)
+        run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "commit",
+            "--message-file",
+            str(msg_file(tmp_path)),
+            "--facts",
+            str(facts_file),
+        )
+        assert "untouched" not in json.loads(facts_file.read_text(encoding="utf-8"))["commit"]
+
+
+class TestFactsFileIsRead:
+    """The facts file is written by these tools, but the path comes from the
+    agent -- so being handed the wrong file must be a refusal, not a crash."""
+
+    def test_malformed_json_is_refused(self, repo, run_script, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(bad))
+        assert out.returncode == 1
+        assert "cannot read facts file" in out.stderr
+        assert "Traceback" not in out.stderr
+
+    def test_undecodable_bytes_are_refused(self, repo, run_script, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_bytes(b'{"a": "\xff\xfe"}')
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(bad))
+        assert out.returncode == 1
+        assert "cannot read facts file" in out.stderr
+
+    def test_a_json_array_is_refused(self, repo, run_script, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("[]", encoding="utf-8")
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(bad))
+        assert out.returncode == 1
+        assert "must contain a JSON object" in out.stderr
+
+    def test_a_symlinked_facts_file_is_refused(self, repo, run_script, tmp_path):
+        real = tmp_path / "real.json"
+        real.write_text("{}", encoding="utf-8")
+        link = tmp_path / "link.json"
+        link.symlink_to(real)
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(link))
+        assert out.returncode == 1
+        assert "symlink" in out.stderr
+
+
+class TestFactsRefusesAnUnverifiedCommit:
+    def test_a_hash_whose_content_moved_is_not_recorded(self, repo, run_script, tmp_path):
+        """`facts --hash` must not stamp a commit as this run's result when the
+        content it recorded is not what this run verified."""
+        write_gitignore(repo, "node_modules/\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "add ignores")
+        sha = git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
+        write_gitignore(repo, "COMPLETELY-DIFFERENT/\n")  # the worktree moved on
+
+        facts = tmp_path / "f.json"
+        facts.write_text(json.dumps({"internal": {"written_sha256": "deadbeef"}}), encoding="utf-8")
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "facts", "--facts", str(facts), "--hash", sha
+        )
+        assert out.returncode == 1
+        assert "refusing to record it" in out.stderr
+
+
+class TestBlobComparison:
+    """`blob_matches_worktree` gates both the commit path and the facts path, so
+    they cannot drift on what "same content" means."""
+
+    def test_true_when_the_commit_matches_the_worktree(self, repo):
+        write_gitignore(repo, "node_modules/\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "add")
+        assert gw.blob_matches_worktree(str(repo), "HEAD") is True
+
+    def test_false_when_the_worktree_moved_on(self, repo):
+        write_gitignore(repo, "node_modules/\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "add")
+        write_gitignore(repo, "other/\n")
+        assert gw.blob_matches_worktree(str(repo), "HEAD") is False
+
+    def test_true_when_it_cannot_tell(self, repo):
+        """No .gitignore in the commit and none on disk: unable to compare is
+        not the same as mismatched, and the caller's other checks still run."""
+        assert gw.blob_matches_worktree(str(repo), "HEAD") is True
+
+    def test_trailing_newline_differences_are_not_content_differences(self, repo):
+        """Compared as object ids, so no encoding or newline handling of ours
+        can make two identical blobs look different."""
+        write_gitignore(repo, "node_modules/\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "add")
+        write_gitignore(repo, "node_modules/\n")
+        assert gw.blob_matches_worktree(str(repo), "HEAD") is True
+
+
+def test_an_unhandled_push_action_fails_loudly(repo, monkeypatch):
+    """Defensive branch: if push_plan ever grows an action `push` does not know,
+    it must stop rather than fall off the end and report success."""
+    monkeypatch.setattr(
+        gw, "push_plan", lambda *a, **k: {"action": "teleport", "permits_push": True}
+    )
+    args = type(
+        "Args",
+        (),
+        {
+            "dir": str(repo),
+            "confirm_force": False,
+            "expect_remote": None,
+            "remote": None,
+            "facts": None,
+        },
+    )()
+    with pytest.raises(SystemExit) as excinfo:
+        gw.cmd_push(args)
+    assert excinfo.value.code == 1
+
+
 def test_repos_are_isolated(tmp_path):
     """Guard the fixtures themselves: a commit in one must not appear in the other."""
     a = init_repo(tmp_path / "a")

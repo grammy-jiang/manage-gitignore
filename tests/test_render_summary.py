@@ -8,14 +8,13 @@ whole summary down, and no field may be able to forge output it does not own.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 
 import pytest
 
 import summary as rs
-from conftest import MODULE, REPO
+from conftest import MODULE, script_command, script_env
 
 FULL_FACTS = {
     "scan": {
@@ -63,16 +62,18 @@ def render(facts: dict) -> str:
 
 
 def run_cli(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join([str(REPO / "src"), env.get("PYTHONPATH", "")]).rstrip(
-        os.pathsep
-    )
+    """summary.py as SKILL.md's last step runs it.
+
+    Built through conftest's helpers rather than by hand, so this path gets the
+    same environment discipline and the same coverage instrumentation as every
+    other script the suite drives.
+    """
     return subprocess.run(
-        [sys.executable, str(MODULE["summary"]), *args],
+        script_command(MODULE["summary"], args),
         input=stdin,
         capture_output=True,
         text=True,
-        env=env,
+        env=script_env(),
     )
 
 
@@ -111,6 +112,210 @@ class TestRejectsAWrongFile:
         assert out.returncode == 1
         assert "must be a JSON object" in out.stderr
         assert "Traceback" not in out.stderr
+
+    @pytest.mark.parametrize("body", ["3", '"a string"', "null", "true"])
+    def test_every_non_object_json_value_is_rejected(self, tmp_path, body):
+        path = tmp_path / "f.json"
+        path.write_text(body, encoding="utf-8")
+        out = run_cli(str(path))
+        assert out.returncode == 1
+        assert "must be a JSON object" in out.stderr
+
+    def test_malformed_json_names_the_problem(self, tmp_path):
+        path = tmp_path / "f.json"
+        path.write_text("{not json", encoding="utf-8")
+        out = run_cli(str(path))
+        assert out.returncode == 1
+        assert "invalid JSON" in out.stderr
+        assert "Traceback" not in out.stderr
+
+    def test_undecodable_bytes_are_reported_not_raised(self, tmp_path):
+        path = tmp_path / "f.json"
+        path.write_bytes(b'{"a": "\xff\xfe"}')
+        out = run_cli(str(path))
+        assert out.returncode == 1
+        assert "Traceback" not in out.stderr
+
+    def test_a_missing_facts_file_is_an_error(self, tmp_path):
+        out = run_cli(str(tmp_path / "absent.json"))
+        assert out.returncode == 1
+        assert "Traceback" not in out.stderr
+
+    def test_a_symlinked_facts_file_is_refused(self, tmp_path):
+        """Same no-follow reader as everywhere else: a facts path is
+        caller-supplied and could point anywhere."""
+        real = tmp_path / "real.json"
+        real.write_text("{}", encoding="utf-8")
+        link = tmp_path / "link.json"
+        link.symlink_to(real)
+        out = run_cli(str(link))
+        assert out.returncode == 1
+        assert "symlink" in out.stderr
+        assert "Traceback" not in out.stderr
+
+    def test_a_directory_is_refused(self, tmp_path):
+        out = run_cli(str(tmp_path))
+        assert out.returncode == 1
+        assert "Traceback" not in out.stderr
+
+
+class TestCliSuccess:
+    """The command SKILL.md's last step runs. It is the only place the summary
+    is ever produced, so its exit code and stream discipline are the contract."""
+
+    def _facts(self, tmp_path):
+        path = tmp_path / "facts.json"
+        path.write_text(json.dumps(FULL_FACTS), encoding="utf-8")
+        return path
+
+    def test_renders_to_stdout_and_exits_zero(self, tmp_path):
+        out = run_cli(str(self._facts(tmp_path)))
+        assert out.returncode == 0
+        assert out.stderr == ""
+        for header in ("SCAN", "TEMPLATES", "MERGE", "WRITE", "COMMIT", "NET"):
+            assert header in out.stdout
+
+    def test_color_never_emits_no_escape_bytes(self, tmp_path):
+        out = run_cli(str(self._facts(tmp_path)), "--color", "never")
+        assert out.returncode == 0
+        assert "\x1b" not in out.stdout
+
+    def test_color_always_emits_escape_bytes(self, tmp_path):
+        """Not a tty under capture, so `always` must override the tty check."""
+        out = run_cli(str(self._facts(tmp_path)), "--color", "always")
+        assert out.returncode == 0
+        assert "\x1b" in out.stdout
+
+    def test_color_auto_is_plain_when_not_a_tty(self, tmp_path):
+        out = run_cli(str(self._facts(tmp_path)), "--color", "auto")
+        assert out.returncode == 0
+        assert "\x1b" not in out.stdout
+
+    def test_an_unknown_color_choice_is_a_usage_error(self, tmp_path):
+        out = run_cli(str(self._facts(tmp_path)), "--color", "chartreuse")
+        assert out.returncode == 2
+
+    def test_an_abbreviated_flag_is_not_accepted(self, tmp_path):
+        """allow_abbrev=False: `--col` must not silently mean `--color`."""
+        out = run_cli(str(self._facts(tmp_path)), "--col", "never")
+        assert out.returncode == 2
+
+    def test_no_arguments_is_a_usage_error(self):
+        assert run_cli().returncode == 2
+
+    def test_an_empty_facts_object_still_renders(self, tmp_path):
+        path = tmp_path / "facts.json"
+        path.write_text("{}", encoding="utf-8")
+        out = run_cli(str(path))
+        assert out.returncode == 0
+        assert "manage-gitignore" in out.stdout
+
+
+class TestColorDecision:
+    """`use_color` reads the environment, so each rule needs pinning separately;
+    a wrong answer here either strips colour from a terminal or writes escape
+    bytes into a pipe."""
+
+    def test_never_beats_everything(self, monkeypatch):
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        assert rs.use_color("never") is False
+
+    def test_always_beats_a_non_tty(self):
+        assert rs.use_color("always") is True
+
+    def test_auto_honours_no_color(self, monkeypatch):
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+        assert rs.use_color("auto") is False
+
+    def test_auto_honours_force_color(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        assert rs.use_color("auto") is True
+
+    def test_auto_is_on_for_a_real_terminal(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.setenv("TERM", "xterm")
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+        assert rs.use_color("auto") is True
+
+    def test_auto_is_off_for_a_dumb_terminal(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.setenv("TERM", "dumb")
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+        assert rs.use_color("auto") is False
+
+    def test_auto_is_off_when_piped(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+        assert rs.use_color("auto") is False
+
+
+class TestSectionVariants:
+    """Each of these is a branch the full-facts fixture never takes, and each
+    would be a wrong sentence in front of a user rather than a crash."""
+
+    def test_a_section_whose_every_row_is_absent_is_omitted(self):
+        """emit_section skips rather than printing a header over nothing.
+
+        Called directly: a caller reaching it with rows that are all None is the
+        case worth pinning, and every facts shape that renders happens to filter
+        those out earlier.
+        """
+        lines: list[str] = []
+        rs.emit_section(lines, "WRITE", [("path", None), ("mode", None)], rs.Pal(False))
+        assert lines == []
+
+    def test_a_section_with_one_present_row_is_emitted(self):
+        lines: list[str] = []
+        rs.emit_section(lines, "WRITE", [("path", None), ("mode", "created")], rs.Pal(False))
+        assert "WRITE" in "\n".join(lines)
+        assert "created" in "\n".join(lines)
+        assert "path" not in "\n".join(lines)
+
+    def test_a_merged_block_does_not_claim_to_be_verbatim(self):
+        out = render({"merge": {"verbatim": False, "custom_kept": 2}})
+        assert "merged with custom rules" in out
+        assert "verbatim" not in out
+
+    def test_a_verbatim_block_says_so_with_its_esc_count(self):
+        out = render({"merge": {"verbatim": True, "esc_bytes": 0}})
+        assert "verbatim" in out
+        assert "0 ESC" in out
+
+    def test_a_new_file_is_reported_as_created_not_overwritten(self):
+        out = render({"write": {"path": ".gitignore", "mode": "create"}})
+        assert "created" in out
+        assert "overwritten" not in out
+
+    def test_an_overwrite_without_a_reason_still_renders(self):
+        out = render({"write": {"path": ".gitignore", "mode": "overwrite"}})
+        assert "overwritten" in out
+
+    def test_a_commit_scope_without_untouched_files_says_nothing_extra(self):
+        out = render(
+            {"commit": {"choice": "commit", "hash": "abc1234", "scope": ".gitignore only"}}
+        )
+        assert ".gitignore only" in out
+        assert "untouched" not in out
+
+    def test_net_renders_a_diffstat_with_no_template_counts(self):
+        out = render({"net": {"diffstat": "+7 / -3"}})
+        assert "NET" in out
+        assert "+7" in out
+        assert "templates" not in out.split("NET", 1)[1]
+
+    def test_net_renders_template_counts_with_no_diffstat(self):
+        out = render({"net": {"prev_count": 1, "new_count": 2}, "templates": {"added": ["node"]}})
+        assert "NET" in out
+        assert "1 → 2" in out
+        assert "+node" in out
+
+    def test_an_empty_net_section_is_omitted(self):
+        assert "NET" not in render({"net": {}})
 
 
 # ── output cannot be forged ─────────────────────────────────────────────────

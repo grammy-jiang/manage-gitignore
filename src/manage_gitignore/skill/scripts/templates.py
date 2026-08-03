@@ -49,7 +49,7 @@ import sys
 import tempfile
 import time
 from io import BufferedReader
-from typing import NoReturn, NotRequired, TypedDict, cast
+from typing import NoReturn, TypedDict, cast
 
 from shared import (
     Facts,
@@ -83,7 +83,15 @@ BROAD_PATTERNS = {"*", "**", "*.*", "/", "/*", "**/*", ".", "./"}
 ALWAYS_ON = ("git", "macos", "linux", "windows", "vim", "emacs", "visualstudiocode")
 
 
-class DetectRule(TypedDict):
+class _DetectRuleRequired(TypedDict):
+    """The one key every rule must carry. Split out so the rest can be optional
+    on 3.10 as well: `NotRequired` is 3.11+, and a total=False base plus a total
+    subclass is the spelling that works on every version this supports."""
+
+    name: str
+
+
+class DetectRule(_DetectRuleRequired, total=False):
     """One content-based recommendation rule.
 
     Fires when any `markers` basename or any `globs` pattern is present, every
@@ -91,11 +99,10 @@ class DetectRule(TypedDict):
     fired. The matched entry becomes the reported reason.
     """
 
-    name: str
-    markers: NotRequired[tuple[str, ...]]
-    globs: NotRequired[tuple[str, ...]]
-    requires: NotRequired[tuple[str, ...]]
-    suppressed_by: NotRequired[tuple[str, ...]]
+    markers: tuple[str, ...]
+    globs: tuple[str, ...]
+    requires: tuple[str, ...]
+    suppressed_by: tuple[str, ...]
 
 
 DETECT_RULES: tuple[DetectRule, ...] = (

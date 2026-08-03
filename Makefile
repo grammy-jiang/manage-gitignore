@@ -1,4 +1,4 @@
-.PHONY: help test lint format typecheck verify build install uninstall clean
+.PHONY: help test coverage lint format typecheck verify build install uninstall clean
 
 help:
 	@echo "test           run the test suite"
@@ -12,6 +12,16 @@ help:
 
 test:
 	python3 -m pytest
+
+# MG_COVER_SUBPROCESS makes the suite run each script under coverage too --
+# most of it drives them as subprocesses, which a plain run cannot see.
+# COVERAGE_FILE is absolute because those subprocesses run in throwaway cwds.
+coverage:
+	rm -f .coverage .coverage.*
+	COVERAGE_FILE=$(CURDIR)/.coverage MG_COVER_SUBPROCESS=1 \
+	    python3 -m pytest --cov --cov-report= -q
+	COVERAGE_FILE=$(CURDIR)/.coverage python3 -m coverage report
+	COVERAGE_FILE=$(CURDIR)/.coverage python3 tests/check_coverage.py --min 90
 
 lint:
 	python3 -m ruff check .

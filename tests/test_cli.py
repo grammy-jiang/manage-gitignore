@@ -10,10 +10,14 @@ from __future__ import annotations
 import ast
 import os
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
+
+try:  # tomllib landed in 3.11; on 3.10 this one check simply does not run
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on 3.10
+    tomllib = None
 
 from manage_gitignore import cli
 
@@ -43,6 +47,16 @@ class TestSkillSource:
         """
         assert cli.skill_source().parent == Path(cli.__file__).resolve().parent
 
+    def test_a_missing_skill_names_the_path_it_looked_at(self, tmp_path, monkeypatch):
+        """`install` from a broken install should say where it expected to find
+        the skill, not just that it did not."""
+        stand_in = tmp_path / "pkg" / "cli.py"
+        stand_in.parent.mkdir(parents=True)
+        stand_in.touch()
+        monkeypatch.setattr(cli, "__file__", str(stand_in))
+        with pytest.raises(FileNotFoundError, match=str(tmp_path / "pkg" / "skill")):
+            cli.skill_source()
+
     def test_nothing_remaps_the_skill_at_build_time(self):
         """A remap would reintroduce the divergence the layout exists to avoid.
 
@@ -52,12 +66,53 @@ class TestSkillSource:
         why the setting is absent names it, and a substring match cannot tell
         that comment apart from the setting itself.
         """
+        if tomllib is None:
+            pytest.skip("tomllib needs 3.11+; CI checks this on every later version")
         pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
         if not pyproject.is_file():  # running against an installed package, not a checkout
             pytest.skip("no checkout")
         config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         targets = config["tool"]["hatch"]["build"]["targets"]
         assert [name for name, t in targets.items() if "force-include" in t] == []
+
+
+class TestLinkInspection:
+    """`is_our_link` decides whether `uninstall` may delete something. Every
+    answer it can give is worth pinning: a wrong `True` deletes a stranger's
+    skill, a wrong `False` makes uninstall useless."""
+
+    def test_link_target_of_a_real_directory_is_none(self, skills):
+        (skills / "plain").mkdir()
+        assert cli.link_target(skills / "plain") is None
+
+    def test_link_target_of_a_missing_path_is_none(self, skills):
+        assert cli.link_target(skills / "nothing-here") is None
+
+    def test_link_target_reports_a_relative_link_verbatim(self, skills):
+        (skills / "link").symlink_to("../elsewhere/skill", target_is_directory=True)
+        assert cli.link_target(skills / "link") == Path("../elsewhere/skill")
+
+    def test_a_real_directory_is_not_our_link(self, skills):
+        (skills / "plain").mkdir()
+        assert cli.is_our_link(skills / "plain") is False
+
+    def test_a_dangling_link_is_not_our_link(self, skills, tmp_path):
+        (skills / "gone").symlink_to(tmp_path / "vanished", target_is_directory=True)
+        assert cli.is_our_link(skills / "gone") is False
+
+    def test_a_directory_named_skill_without_a_skill_md_is_not_ours(self, skills, tmp_path):
+        """The name alone must not be enough -- `install` links a directory that
+        actually holds a SKILL.md, so anything else is somebody else's."""
+        impostor = tmp_path / "skill"
+        impostor.mkdir()
+        (skills / cli.SKILL_NAME).symlink_to(impostor, target_is_directory=True)
+        assert cli.is_our_link(skills / cli.SKILL_NAME) is False
+
+    def test_a_relative_link_to_the_packaged_skill_is_ours(self, skills):
+        """Resolved against the link's own directory, not the process cwd."""
+        rel = os.path.relpath(cli.skill_source(), skills)
+        (skills / cli.SKILL_NAME).symlink_to(rel, target_is_directory=True)
+        assert cli.is_our_link(skills / cli.SKILL_NAME) is True
 
 
 class TestTheScriptsStandAlone:
@@ -248,3 +303,36 @@ class TestDispatch:
         (skills / cli.SKILL_NAME).mkdir()
         assert cli.main(["install", "--dest", str(skills)]) == 1
         assert "manage-gitignore:" in capsys.readouterr().err
+
+    def test_a_refused_uninstall_exits_non_zero(self, skills, capsys):
+        """A real directory is not ours; refusing must be an exit code, not a
+        message on stdout that a caller could mistake for success."""
+        (skills / cli.SKILL_NAME).mkdir()
+        assert cli.main(["uninstall", "--dest", str(skills)]) == 1
+        assert "not a symlink" in capsys.readouterr().err
+        assert (skills / cli.SKILL_NAME).is_dir()
+
+    def test_force_uninstall_removes_a_foreign_link_through_main(self, skills, tmp_path):
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        (skills / cli.SKILL_NAME).symlink_to(other, target_is_directory=True)
+        assert cli.main(["uninstall", "--dest", str(skills), "--force"]) == 0
+        assert not (skills / cli.SKILL_NAME).is_symlink()
+        assert other.is_dir()
+
+    def test_install_reports_where_it_linked(self, skills, capsys):
+        assert cli.main(["install", "--dest", str(skills)]) == 0
+        out = capsys.readouterr().out
+        assert str(skills / cli.SKILL_NAME) in out
+        assert str(cli.skill_source()) in out
+
+    def test_an_unwritable_skills_directory_is_an_error_not_a_traceback(self, tmp_path, capsys):
+        """OSError is caught alongside FileExistsError; a permission problem
+        should read like a refusal, not a crash."""
+        locked = tmp_path / "locked"
+        locked.mkdir(mode=0o500)
+        try:
+            assert cli.main(["install", "--dest", str(locked / "skills")]) == 1
+            assert "manage-gitignore:" in capsys.readouterr().err
+        finally:
+            locked.chmod(0o700)

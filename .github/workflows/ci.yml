@@ -14,16 +14,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  test:
+    name: Test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # Every version the package claims in `requires-python` and in its
+        # classifiers. A claim nothing runs against is a guess.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -38,6 +41,27 @@ jobs:
           git config --global user.name "CI"
           git config --global init.defaultBranch main
 
+      - name: Test
+        # No network: the suite stubs curl on PATH, so a green run here proves
+        # the offline fixtures still exercise the real fetch path.
+        run: pytest
+
+  quality:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # The oldest supported version, so a construct newer than 3.10 is
+          # caught by the type-checker here rather than by a user on 3.10.
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
       - name: Lint
         run: |
           ruff check .
@@ -46,7 +70,38 @@ jobs:
       - name: Type-check
         run: mypy
 
-      - name: Test
-        # No network: the suite stubs curl on PATH, so a green run here proves
-        # the offline fixtures still exercise the real fetch path.
-        run: pytest
+  coverage:
+    name: Coverage (every file >= 90%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+          git config --global init.defaultBranch main
+
+      - name: Measure
+        # MG_COVER_SUBPROCESS makes the suite run each script under coverage as
+        # well. Most of it drives them as subprocesses, which a plain run cannot
+        # see -- without this the report understates coverage by about a third.
+        env:
+          MG_COVER_SUBPROCESS: "1"
+        run: pytest --cov --cov-report=
+
+      - name: Report
+        run: coverage report
+
+      - name: Gate
+        # A project total hides a hole, so the floor is per file. This is the
+        # same script `make coverage` runs, so local and CI cannot drift.
+        run: python tests/check_coverage.py --min 90

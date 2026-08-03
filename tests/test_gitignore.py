@@ -6,6 +6,7 @@ which, so a change that reintroduces one fails with a reason attached.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -929,3 +930,101 @@ class TestCli:
         target.write_text(target.read_text() + "\n# a comment\nreal.rule\n", encoding="utf-8")
         out = run_script("gitignore.py", "--dir", str(cli_repo), "--detect")
         assert "custom_lines: 1" in out.stdout
+
+
+def _write_args(repo, templates):
+    """The Namespace cmd_write reads, with every flag it consults set."""
+    return argparse.Namespace(
+        dir=str(repo),
+        templates=list(templates),
+        templates_file=None,
+        force=True,
+        facts_out=None,
+    )
+
+
+class TestMissingTargetDirectory:
+    """Every entry point checks --dir before anything expensive: a typo should
+    cost nothing, and must never be reported as an empty repository."""
+
+    def test_recommend_refuses_a_missing_dir(self, run_script, tmp_path):
+        out = run_script("gitignore.py", "--dir", str(tmp_path / "nope"), "--recommend")
+        assert out.returncode == 1
+        assert "target dir not found" in out.stderr
+
+    def test_detect_refuses_a_missing_dir(self, run_script, tmp_path):
+        out = run_script("gitignore.py", "--dir", str(tmp_path / "nope"), "--detect")
+        assert out.returncode == 1
+        assert "target dir not found" in out.stderr
+
+    def test_write_refuses_a_missing_dir_before_touching_the_network(
+        self, run_script, tmp_path, api
+    ):
+        out = run_script("gitignore.py", "--dir", str(tmp_path / "nope"), "git")
+        assert out.returncode == 1
+        assert "target dir not found" in out.stderr
+
+    def test_a_file_given_as_dir_is_refused(self, run_script, tmp_path):
+        afile = tmp_path / "afile"
+        afile.write_text("x\n", encoding="utf-8")
+        out = run_script("gitignore.py", "--dir", str(afile), "--detect")
+        assert out.returncode == 1
+
+
+class TestFetchFailures:
+    """curl carries its own --max-time, but a curl that hangs without producing
+    output would leave the subprocess wait blocking. Driven in-process so the
+    budget can be shortened; as a subprocess this would cost
+    FETCH_MAX_SECONDS + 10 seconds of real time to prove."""
+
+    def test_a_hanging_download_is_killed_and_reported(self, api, monkeypatch):
+        monkeypatch.setattr(gi, "FETCH_MAX_SECONDS", 1)
+        api.set_mode("hang", hang_seconds=30)
+        start = time.monotonic()
+        with pytest.raises(SystemExit) as excinfo:
+            gi.fetch_bytes("list")
+        assert excinfo.value.code == 1
+        assert time.monotonic() - start < 25, "the wait was not bounded"
+
+    def test_a_failing_download_is_reported(self, api):
+        api.set_mode("fail")
+        with pytest.raises(SystemExit) as excinfo:
+            gi.fetch_bytes("list")
+        assert excinfo.value.code == 1
+
+    def test_a_curl_that_finishes_writing_but_never_exits_is_killed(self, api, monkeypatch):
+        """The other stall, and the one the read deadline cannot catch: stdout
+        reaches EOF so the read loop completes, and only the wait is left to
+        time out. Without that bound the process would sit here forever.
+
+        FETCH_MAX_SECONDS is set so the deadline has all but elapsed by the time
+        the wait begins, leaving it its one-second floor.
+        """
+        monkeypatch.setattr(gi, "FETCH_MAX_SECONDS", -9)
+        api.set_mode("linger", hang_seconds=30)
+        start = time.monotonic()
+        with pytest.raises(SystemExit) as excinfo:
+            gi.fetch_bytes("list")
+        assert excinfo.value.code == 1
+        assert time.monotonic() - start < 25, "the wait was not bounded"
+
+
+class TestPostWriteVerification:
+    """The last gate before success is claimed: the file is re-read and checked
+    against what was intended. Everything downstream trusts that check, so if it
+    fails the run must fail rather than report a verified write."""
+
+    def test_a_failed_verification_stops_the_run(self, cli_repo, monkeypatch):
+        """The branch exists for a bug no fixture can conjure, so the check is
+        forced to fail; its job is to turn that bug into a non-zero exit."""
+        monkeypatch.setattr(
+            gi, "verify_written", lambda target, want, kept: (["block marker missing"], b"")
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            gi.cmd_write(_write_args(cli_repo, ["git", "node"]), str(cli_repo / ".gitignore"))
+        assert excinfo.value.code == 1
+
+    def test_verification_passes_on_a_normal_write(self, cli_repo, run_script):
+        out = run_script("gitignore.py", "--dir", str(cli_repo), "git", "node")
+        assert out.returncode == 0, out.stderr
+        assert "Verified" in out.stdout
