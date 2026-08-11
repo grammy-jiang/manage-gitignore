@@ -80,17 +80,23 @@ usually enough — none of them needs the skill named.
 | Codex | `$manage-gitignore` | type `$` for the list, or `/skills` for the picker |
 | GitHub Copilot CLI | `/manage-gitignore` | named inside the sentence: `Use the /manage-gitignore skill to …` |
 
-From a shell, with no interactive session:
+The same names work from a shell — but ask only for **inspection** there:
 
 ```bash
-claude   -p '/manage-gitignore give this repo a proper .gitignore'
-codex    exec '$manage-gitignore add Rust and JetBrains ignores'
+claude   -p '/manage-gitignore what does my .gitignore actually cover?'
+codex    exec '$manage-gitignore what does my .gitignore actually cover?'
 copilot  -p 'Use the /manage-gitignore skill to show what my .gitignore covers'
 ```
 
-To confirm the agent can see it: `/skills` in Codex or Copilot, `copilot skill
-list` from a shell, and the `/` menu in Claude Code. A skill installed mid-session
-needs `/skills reload` in Copilot, and a restart in Claude Code or Codex.
+Inspection writes nothing, so it needs no confirmation and finishes. **A request
+that would write stops instead**, at the first question, and says which answer is
+missing: `-p` and `exec` leave nobody to ask, and this skill never guesses an
+answer it was supposed to be given. Run those interactively.
+
+To confirm the agent can see the skill at all: `/skills` in Codex or Copilot,
+`copilot skill list` from a shell, and the `/` menu in Claude Code. One installed
+mid-session needs `/skills reload` in Copilot, and a restart in Claude Code or
+Codex.
 
 ### Two things that differ by agent
 
