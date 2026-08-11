@@ -48,6 +48,11 @@ dev = [
     # `make build` already assumed this; tests/test_packaging.py builds a wheel
     # and reads what came out, so now it is declared rather than assumed.
     "build>=1.0",
+    # The build backend, declared a second time on purpose. [build-system] tells
+    # a *builder* to fetch it into an isolated environment -- over the network,
+    # which no test here may need. Having it installed lets that test build with
+    # --no-isolation and stay offline.
+    "hatchling",
 ]
 
 [project.scripts]

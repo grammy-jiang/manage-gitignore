@@ -43,8 +43,12 @@ def built(tmp_path_factory) -> Path:
     if not (REPO / "pyproject.toml").is_file():  # installed package, not a checkout
         pytest.skip("no checkout")
     out = tmp_path_factory.mktemp("dist")
+    # --no-isolation, because `build` otherwise creates a throwaway environment
+    # and fetches the backend named in [build-system] from PyPI. No test here
+    # touches the network, and that rule is worth more than build isolation:
+    # hatchling is in the dev extra so this resolves to the installed one.
     subprocess.run(
-        [sys.executable, "-m", "build", "--outdir", str(out), str(REPO)],
+        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(out), str(REPO)],
         capture_output=True,
         check=True,
     )
@@ -109,7 +113,12 @@ class TestTheSdistCarriesTheSkillToo:
     def test_the_skill_files_are_in_it(self, sdist):
         with tarfile.open(sdist) as archive:
             names = archive.getnames()
-        root = Path(names[0]).parts[0]  # manage_gitignore-<version>
+        # Every member shares one top-level directory, `manage_gitignore-<version>`.
+        # Derived from all of them rather than from names[0]: archive order is
+        # not specified, so the first entry need not be the root.
+        roots = {Path(name).parts[0] for name in names}
+        assert len(roots) == 1, f"expected one top-level directory, got {sorted(roots)}"
+        root = roots.pop()
         missing = [f for f in SKILL_FILES if f"{root}/src/{f}" not in names]
         assert missing == []
 
@@ -128,13 +137,22 @@ class TestTheWheelInstallsAndRuns:
         env_dir = tmp_path / "venv"
         subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True)
         bin_dir = env_dir / ("Scripts" if sys.platform == "win32" else "bin")
+        # --no-index: the package has no runtime dependencies, so nothing should
+        # be fetched, and this makes that a guarantee rather than an expectation.
         subprocess.run(
-            [str(bin_dir / "pip"), "install", "--no-cache-dir", "--quiet", str(wheel)],
+            [
+                str(bin_dir / "pip"),
+                "install",
+                "--no-index",
+                "--no-cache-dir",
+                "--quiet",
+                str(wheel),
+            ],
             check=True,
         )
 
         console = bin_dir / "manage-gitignore"
-        assert subprocess.run([str(console), "--version"], check=True).returncode == 0
+        subprocess.run([str(console), "--version"], check=True)
 
         home = tmp_path / "home"
         home.mkdir()
@@ -148,9 +166,16 @@ class TestTheWheelInstallsAndRuns:
 
         # The point of the symlink: the scripts resolve each other from wherever
         # they were linked to, with the package not on PYTHONPATH at all.
+        #
+        # The venv's interpreter, not `sys.executable`. The outer one is the dev
+        # environment, where pytest, ruff, mypy and PyYAML are all importable --
+        # so a script that grew an undeclared third-party import would run there
+        # and fail on a user's machine. The venv holds this package and nothing
+        # else, which is the condition actually being claimed.
+        python = bin_dir / ("python.exe" if sys.platform == "win32" else "python")
         script = home / ".claude" / "skills" / "manage-gitignore" / "scripts" / "templates.py"
         done = subprocess.run(
-            [sys.executable, str(script), "--help"],
+            [str(python), str(script), "--help"],
             capture_output=True,
             text=True,
             env={"PATH": str(bin_dir)},
