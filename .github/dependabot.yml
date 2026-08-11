@@ -14,6 +14,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Wait a week before proposing a release. A compromised version is usually
+    # yanked within days, and the whole value of pinning is lost if the pin is
+    # bumped to a bad release the day it appears.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore(ci)"
     groups:
@@ -27,6 +32,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore(deps)"
     groups:

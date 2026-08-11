@@ -9,6 +9,26 @@ CI runs the tests on 3.10 through 3.14, lints and type-checks on 3.10, gates
 every file at 95% coverage, and runs every pre-commit hook. A tag will not build
 if any of that fails.
 
+The workflows are audited by `zizmor`, as a hook, so it runs locally and in CI
+alike. It reads them for the mistakes YAML cannot have an opinion about, and it
+found four real ones: `actions/checkout` leaving the job's `GITHUB_TOKEN` in
+`.git/config` seven times over, a pip cache restored into the job that builds
+what gets published to PyPI, a release workflow with no concurrency group, and
+Dependabot with no cooldown before proposing a brand-new release. It runs at
+`--persona=auditor`, which also insists every job has a name and every
+`permissions:` grant a comment saying why.
+
+Two things were considered and declined, so nobody has to work out why twice:
+
+- **`pip-audit`.** There are no runtime dependencies, so nothing it could find
+  would ever reach a user's machine. It would cover the `dev` extra, where
+  Dependabot already opens a pull request for every release — and a CVE in a
+  linter blocking an unrelated documentation change buys nothing.
+- **`agents/openai.yaml`.** Codex reads it for a display name and icon. It would
+  be a second home for the skill's name and description, which `SKILL.md`
+  already owns, in exchange for cosmetics on one of the three products and no
+  way to check the result from here.
+
 `pre-commit install` once, so the hooks run where they are cheap to fix.
 `make verify` covers none of them — gitleaks, markdownlint, yamllint and the
 base hygiene hooks all live only in `.pre-commit-config.yaml`.
