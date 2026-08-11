@@ -103,8 +103,17 @@ def git(
         "protocol.file.allow=user",
     ]
     try:
-        proc = subprocess.run(
-            ["git", "-C", repo, *hardening, *args],
+        # S603: no shell, and every element is a list item, so nothing here can
+        # be reinterpreted as a command. `args` is built by this module; values
+        # that come from outside -- a ref, a remote, a branch -- go through
+        # `refuse_option_like` first, so none of them can even pose as a flag.
+        # S607: `git` by name is deliberate. Resolving it to an absolute path
+        # would pick one git and ignore the one the user's PATH says to use,
+        # which is the wrong answer for a tool that runs inside their shell
+        # environment; a PATH that already resolves to somebody else's git is a
+        # compromise this cannot fix from here.
+        proc = subprocess.run(  # noqa: S603
+            ["git", "-C", repo, *hardening, *args],  # noqa: S607
             env=env,
             input=stdin,
             capture_output=True,

@@ -230,14 +230,23 @@ def fetch_bytes(path: str) -> bytes:
     # fills a stderr pipe would deadlock once that pipe's buffer filled.
     with tempfile.TemporaryFile() as errfile:
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfile)
+            # S603: no shell, and `cmd` is a list this function built. Its only
+            # variable part is `url`, assembled from catalogue names that were
+            # validated against the fetched index before reaching here.
+            # (`cmd[0]` is "curl", by name and on purpose, for the reason
+            # gitwork.py gives for `git`. S607 does not fire here only because
+            # ruff cannot see into the variable.)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfile)  # noqa: S603
         except FileNotFoundError:
             die("curl not found")
         # `with proc:` closes the pipe and reaps the child on every exit path,
         # including the die() calls below -- otherwise a capped or timed-out
         # fetch leaks the descriptor it was reading.
         with proc:
-            assert proc.stdout is not None
+            # S101: narrowing for the type checker, not error handling. Popen
+            # was given stdout=PIPE three lines up, so None is not reachable;
+            # this states that where mypy can see it.
+            assert proc.stdout is not None  # noqa: S101
             # Waiting on readiness rather than calling a blocking read is what
             # makes the clock authoritative: a curl that produces NO output at
             # all would otherwise sit in read() past every deadline, which is
