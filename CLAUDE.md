@@ -156,8 +156,20 @@ so it is equivalent as far as anything reachable goes. The argument stays: it is
 a deliberate "do not guess" on the function that decides which of somebody's
 rules come back.
 
-`gitwork.py` has not had this treatment. Its tests drive real repositories, so a
-run there costs minutes per mutant rather than seconds.
+`gitwork.py` has had it too — `python3 tests/mutate.py --subject gitwork`, its
+pure half only, for the same reason: the rest of that file runs git, and a
+mutant there costs minutes rather than seconds.
+
+It scored **32/43**. Every survivor was a string literal, and every one is shown
+to somebody at a decision point — where a push would land, what kind of value
+was refused, and the message saying a commit touched more than `.gitignore` and
+must not be pushed. Dropping the parentheses around a URL leaves the URL in the
+string, so a substring check still passed while the user was shown
+`origin/maingit@github.com:x/y.git`. It now scores **43/43**.
+
+Both audits found the same thing: what goes unchecked is not the logic, it is
+the sentence the logic produces. Asserting that a message exists leaves every
+word of it free.
 
 Measuring coverage needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
 the suite drives the scripts as subprocesses, which a plain coverage run cannot
