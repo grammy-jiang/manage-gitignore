@@ -260,3 +260,71 @@ class TestRecordedPushKeepsTheWholeBranchName:
 
         push = json.loads(facts.read_text(encoding="utf-8"))["commit"]["push"]
         assert push == {"sha": "abc1234", "remote": "origin", "branch": "feature/foo"}
+
+
+class TestGapsFoundByMutationAudit:
+    """Diagnostics the suite produced without ever reading, found by
+    `python3 tests/mutate.py --subject gitwork`.
+
+    Every survivor in that run was a string literal, and every one of them is
+    shown to a person at a decision point: where a push would land, and what
+    kind of value was refused. Asserting that a message merely exists leaves its
+    wording free to become anything, including nothing.
+    """
+
+    def test_an_upstream_destination_reads_as_a_place(self):
+        """Survived: the `" ("` and `")"` around the URL, separately.
+
+        Dropping them leaves the URL in the string, so a substring check still
+        passes -- and the user is shown `origin/maingit@github.com:x/y.git`.
+        """
+        dest = gitwork.destination(
+            {
+                "remote": "origin",
+                "remote_url": "git@github.com:someone/repo.git",
+                "merge_ref": "refs/heads/main",
+            }
+        )
+        assert dest == "origin/main (git@github.com:someone/repo.git)"
+
+    def test_a_settled_first_push_reads_as_a_place(self):
+        """Survived: the same two, on the branch below it."""
+        dest = gitwork.destination(
+            {"remote": "fork", "remote_urls": {"fork": "https://example.invalid/x.git"}}
+        )
+        assert dest == "fork (https://example.invalid/x.git)"
+
+    def test_an_upstream_without_a_known_url_is_still_a_sentence(self):
+        """The other side of that conditional: no URL to name, and the result
+        must still read as a destination rather than trailing an empty pair."""
+        dest = gitwork.destination({"remote": "origin", "merge_ref": "refs/heads/x"})
+        assert dest == "origin/x"
+
+    def test_the_unsettled_list_reads_as_a_choice(self):
+        """Survived: the `", "` between candidates and the `"one of "` prefix.
+
+        Without the separator the pairs run together; without the prefix the
+        sentence stops saying that a choice is coming. Both survive a check that
+        only looks for each name beside its own URL.
+        """
+        dest = gitwork.destination(
+            {
+                "remote": None,
+                "remote_urls": {"origin": "https://a.invalid/r", "fork": "https://b.invalid/r"},
+            }
+        )
+        assert dest == (
+            "one of fork (https://b.invalid/r), origin (https://a.invalid/r)"
+            " — not settled yet, a follow-up question will confirm"
+        )
+
+    def test_a_refused_ref_says_what_kind_of_value_it_was(self, capsys):
+        """Survived: the `"ref"` label emptied.
+
+        `refuse_option_like` builds its message from that word, so an emptied
+        one leaves "refusing  that looks like an option" and the caller is not
+        told what was wrong.
+        """
+        with pytest.raises(SystemExit):
+            gitwork.safe_ref("--output=/etc/passwd")
+        assert "refusing ref that looks like an option" in capsys.readouterr().err

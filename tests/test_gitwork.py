@@ -1590,3 +1590,29 @@ class TestStatusShowsWhatWillBeCommitted:
             "gitwork.py", "--dir", str(repo), "status", "--facts", str(repo / ".gitignore")
         )
         assert out.returncode != 0
+
+
+class TestScopeViolationSaysWhatWentWrong:
+    """Survived a mutation audit: all four pieces of the message, emptied.
+
+    This is what a user is shown when a commit turned out to touch more than
+    .gitignore -- the one outcome where the next step is "do not push". Tests
+    asserting only that a message came back left every word of it free.
+    """
+
+    def test_a_commit_touching_more_than_the_target_is_reported_in_full(self, repo):
+        write_gitignore(repo)
+        (repo / "other.txt").write_text("not ours\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "two files")
+
+        message = gw.scope_violation(str(repo), [".gitignore", "other.txt"])
+
+        assert message is not None
+        assert message.startswith("commit touches ['.gitignore', 'other.txt']")
+        assert " -- expected only .gitignore." in message
+        assert " Do NOT push; " in message
+        assert message.endswith(".")
+
+    def test_a_commit_touching_only_the_target_is_not_a_violation(self, repo):
+        assert gw.scope_violation(str(repo), [".gitignore"]) is None

@@ -9,9 +9,10 @@ without checking.
 
 Run by hand, never in CI:
 
-    python3 tests/mutate.py                 # the pure merge core of templates.py
-    python3 tests/mutate.py --all-functions # every function in the file
-    python3 tests/mutate.py --list          # what would be tried, without running
+    python3 tests/mutate.py                    # the pure merge core of templates.py
+    python3 tests/mutate.py --subject gitwork  # what a push would do, and the option boundary
+    python3 tests/mutate.py --all-functions    # every function in the file
+    python3 tests/mutate.py --list             # what would be tried, without running
 
 Why this and not mutmut: mutmut derives a module name from a file's path and
 expects `manage_gitignore.skill.scripts.templates`, while the suite imports
@@ -37,30 +38,62 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-TARGET = Path("src/manage_gitignore/skill/scripts/templates.py")
+SCRIPTS = Path("src/manage_gitignore/skill/scripts")
 
-# The pure half of templates.py: the merge, and the checks around it. These need
-# no repository, no network and no subprocess, so the tests that cover them run
-# in well under a second -- which is what makes a few hundred mutants practical.
-PURE_CORE = (
-    "is_pattern_line",
-    "count_patterns",
-    "strip_bom",
-    "api_pattern_sections",
-    "risky_patterns",
-    "classify",
-    "count_esc",
-    "verify_bytes",
-    "split_regions",
-    "split_existing",
-    "reapply_custom",
-    "dedup_custom",
-    "normalize_templates",
-)
 
-# The tests that exercise that half, and only those. Adding the rest of the
-# suite would multiply the runtime by fifty to say nothing new about this code.
-TESTS = ("tests/test_gitignore.py", "tests/test_merge_properties.py")
+@dataclass(frozen=True)
+class Subject:
+    """A file to mutate, the part of it worth mutating, and what to run.
+
+    `pure` names the functions that need no repository, no network and no
+    subprocess. Restricting to those is what makes this practical: their tests
+    run in seconds, so a few hundred mutants cost a minute rather than an
+    afternoon. `--all-functions` lifts the restriction for anyone with time.
+    """
+
+    path: Path
+    pure: tuple[str, ...]
+    tests: tuple[str, ...]
+
+
+SUBJECTS = {
+    "templates": Subject(
+        path=SCRIPTS / "templates.py",
+        # The merge, and the checks around it.
+        pure=(
+            "is_pattern_line",
+            "count_patterns",
+            "strip_bom",
+            "api_pattern_sections",
+            "risky_patterns",
+            "classify",
+            "count_esc",
+            "verify_bytes",
+            "split_regions",
+            "split_existing",
+            "reapply_custom",
+            "dedup_custom",
+            "normalize_templates",
+        ),
+        tests=("tests/test_gitignore.py", "tests/test_merge_properties.py"),
+    ),
+    "gitwork": Subject(
+        path=SCRIPTS / "gitwork.py",
+        # What a push would do, said to the user, and the boundary that stops a
+        # repository-supplied name reaching git as a flag. The rest of this file
+        # runs git, and a mutant there costs minutes rather than seconds.
+        pure=(
+            "destination",
+            "describe",
+            "safe_ref",
+            "safe_token",
+            "commit_scope",
+            "scope_violation",
+            "record_push",
+        ),
+        tests=("tests/test_gitwork.py", "tests/test_gitwork_properties.py"),
+    ),
+}
 
 # Deliberately a small, explainable set. Each entry turns one node into another
 # that is still valid Python and means something different. Operators that
@@ -213,15 +246,17 @@ PYTEST_PASSED = 0
 PYTEST_TESTS_FAILED = 1
 
 
-def run_tests(workspace: Path) -> subprocess.CompletedProcess[bytes]:
+def run_tests(workspace: Path, subject: Subject) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *TESTS],
+        [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *subject.tests],
         cwd=workspace,
         capture_output=True,
     )
 
 
-def run_batch(args: tuple[Path, str, list[int], set[str] | None]) -> list[tuple[int, bool]]:
+def run_batch(
+    args: tuple[Path, Subject, str, list[int], set[str] | None],
+) -> list[tuple[int, bool]]:
     """Run a batch of mutations in one workspace, one after another.
 
     The batches are round-robin slices of the mutation list, so a worker's
@@ -230,11 +265,12 @@ def run_batch(args: tuple[Path, str, list[int], set[str] | None]) -> list[tuple[
     so two tasks sharing one would overwrite each other's mutation and report on
     whichever won the race.
     """
-    workspace, source, indexes, functions = args
+    workspace, subject, source, indexes, functions = args
     results = []
     for index in indexes:
-        (workspace / TARGET).write_text(mutated_source(source, index, functions), encoding="utf-8")
-        done = run_tests(workspace)
+        target = workspace / subject.path
+        target.write_text(mutated_source(source, index, functions), encoding="utf-8")
+        done = run_tests(workspace, subject)
         if done.returncode not in (PYTEST_PASSED, PYTEST_TESTS_FAILED):
             raise RuntimeError(
                 f"pytest exited {done.returncode} on mutation {index}, which is neither "
@@ -247,13 +283,20 @@ def run_batch(args: tuple[Path, str, list[int], set[str] | None]) -> list[tuple[
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument(
+        "--subject",
+        choices=sorted(SUBJECTS),
+        default="templates",
+        help="which script to mutate (default: templates)",
+    )
     parser.add_argument("--all-functions", action="store_true", help="not just the pure core")
     parser.add_argument("--list", action="store_true", help="print the mutations, run nothing")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
-    functions = None if args.all_functions else set(PURE_CORE)
-    source = (REPO / TARGET).read_text(encoding="utf-8")
+    subject = SUBJECTS[args.subject]
+    functions = None if args.all_functions else set(subject.pure)
+    source = (REPO / subject.path).read_text(encoding="utf-8")
     found = candidates(source, functions)
 
     if args.list:
@@ -262,7 +305,7 @@ def main() -> int:
         print(f"{len(found)} mutations")
         return 0
 
-    print(f"{len(found)} mutations, {args.workers} workers")
+    print(f"{subject.path.name}: {len(found)} mutations, {args.workers} workers")
     with tempfile.TemporaryDirectory() as scratch:
         workspaces = []
         for worker in range(args.workers):
@@ -276,7 +319,7 @@ def main() -> int:
         # a missing dependency or a broken fixture makes every mutant look
         # killed, and the report says the suite is perfect precisely when it is
         # not running. The baseline runs in a workspace no mutation has touched.
-        baseline = run_tests(workspaces[0])
+        baseline = run_tests(workspaces[0], subject)
         if baseline.returncode != PYTEST_PASSED:
             print(
                 f"the tests do not pass unmutated (pytest exited {baseline.returncode}), "
@@ -292,7 +335,7 @@ def main() -> int:
         for position, mutation in enumerate(found):
             batches[position % args.workers].append(mutation.index)
         work = [
-            (workspaces[worker], source, batch, functions)
+            (workspaces[worker], subject, source, batch, functions)
             for worker, batch in enumerate(batches)
             if batch
         ]
@@ -305,7 +348,7 @@ def main() -> int:
     if survivors:
         print("\nSurvived -- the suite runs these lines without checking them:")
         for mutation in sorted(survivors, key=lambda m: m.line):
-            print(f"  {TARGET.name}:{mutation.line:<5} {mutation.description}")
+            print(f"  {subject.path.name}:{mutation.line:<5} {mutation.description}")
     return 1 if survivors else 0
 
 
