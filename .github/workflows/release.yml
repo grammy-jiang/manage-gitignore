@@ -27,11 +27,18 @@ on:
 permissions:
   contents: read
 
-# One release at a time, and never cancel one in flight: the upload to PyPI
-# cannot be undone, so a cancelled run could leave a version half-published --
-# attached to a GitHub Release and missing from the index, or the reverse.
+# Per tag, not one group for every release. GitHub keeps at most one pending run
+# per group, so a shared group makes a third tag cancel the second while the
+# first is still running -- `cancel-in-progress: false` does not prevent that,
+# and a tag would silently produce no artifacts at all. Keyed on the ref, the
+# only thing this serialises is the same tag racing itself, which is the case
+# that can actually collide: a push and a manual re-run.
+#
+# Never cancelling matters for the same reason it always did: the upload to PyPI
+# cannot be undone, so a cancelled run could leave a version attached to a
+# GitHub Release and missing from the index, or the reverse.
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
