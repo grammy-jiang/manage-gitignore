@@ -138,6 +138,17 @@ script under two module names at once — `manage_gitignore.skill.scripts.shared
 
 ## Testing
 
+One thing does talk to gitignore.io, and it is not a test: `tests/check_api_contract.py`,
+run weekly by `.github/workflows/api-contract.yml`. Stubbing `curl` everywhere
+means the contract with the outside world is asserted only against fixtures
+written here — if Toptal changed the markers or the URL, the skill would break
+for every user with the whole suite green. The check calls `templates.fetch_text`
+and `templates.check_api_block` rather than describing the contract again, so it
+cannot drift from what the skill requires, and it is the only place the real
+fetch path runs against the real service. It exits 2 rather than 1 when the API
+is merely unreachable: a watcher that cried wolf at every network blip would be
+switched off within a month.
+
 - **No test touches the network.** A stub `curl` goes on `PATH` (see
   `tests/conftest.py`), so the real fetch path — including the streaming byte cap
   and the response validation — runs offline against canned responses.

@@ -1,0 +1,70 @@
+name: API contract
+
+# The one thing here that talks to gitignore.io.
+#
+# Every test stubs `curl`, which is what makes the suite fast, offline and
+# deterministic — and means the contract with the outside world is asserted only
+# against fixtures written in this repository. If Toptal changed the markers or
+# the URL, the skill would break for every user with all tests green.
+#
+# On a schedule and never in the gates: a pull request must not fail because
+# somebody else's service was down. Weekly is enough — this watches for a change
+# nobody announces, not for an outage.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, off the hour: shared runners are busiest at :00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-contract
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: gitignore.io still answers as expected
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # persist-credentials: false -- checkout otherwise leaves the job's
+        # GITHUB_TOKEN in .git/config, where anything that later archives the
+        # workspace would carry it out with them. Nothing here pushes with git.
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # No `pip install` and no PYTHONPATH: the check puts the scripts directory
+      # on sys.path itself, the way the scripts resolve each other, and needs
+      # nothing but the standard library. If this step ever needs a dependency,
+      # rule 3 has been broken rather than this workflow.
+      - name: Ask the API
+        id: contract
+        run: |
+          set +e
+          python3 tests/check_api_contract.py
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      # Unreachable is not a contract change. Saying so out loud, and passing,
+      # is what keeps this worth leaving switched on.
+      - name: Report
+        # Through the environment, not `${{ }}` inside the script. The value
+        # here is this workflow's own exit code and could not carry anything --
+        # but interpolating an expression into a shell body is the habit that
+        # makes the next one an injection, and zizmor refuses the habit rather
+        # than arguing about the instance.
+        env:
+          RC: ${{ steps.contract.outputs.rc }}
+        run: |
+          case "$RC" in
+            0) echo "::notice::gitignore.io answers as this skill expects" ;;
+            2) echo "::warning::gitignore.io could not be reached; the contract was not checked" ;;
+            *) echo "::error::the gitignore.io contract has changed -- templates.py needs a look"
+               exit 1 ;;
+          esac
