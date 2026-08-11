@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "manage-gitignore"
-version = "0.3.0"
+version = "0.3.1"
 description = "Build a repository's .gitignore from gitignore.io, keeping its own custom rules — with an agent skill that drives it"
 readme = "README.md"
 requires-python = ">=3.10"
