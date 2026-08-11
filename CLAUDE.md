@@ -137,7 +137,29 @@ barely-touched 200-line one well past 95% overall. The floor was 90% until every
 file had been at 97.9% or better for long enough that 90 was not a floor at all,
 only a number nothing could fail.
 
-Measuring needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
+Coverage says a line ran. It does not say the tests would notice if that line
+were wrong, and at 99% that is the only question left. `tests/mutate.py` answers
+it: it changes one operator or literal at a time in `templates.py`, runs the two
+test files that cover it, and reports what survived. By hand, never in CI —
+`python3 tests/mutate.py`, about a minute on eight cores.
+
+The first run scored **78/90**. The twelve survivors were: which `### Name ###`
+section a dropped rule is attributed to (four), the fallback when a rule sits
+before any section, the exact extent of the block when custom rules touch the
+end marker, two diagnostics nothing read, and the header's template list.
+`TestGapsFoundByMutationAudit` in `tests/test_gitignore.py` pins each, with the
+surviving mutation named in the docstring. It now scores **89/90**.
+
+The one survivor is `autojunk=False` in `reapply_custom`. Several inputs built
+to trigger difflib's popularity heuristic produce an identical diff either way,
+so it is equivalent as far as anything reachable goes. The argument stays: it is
+a deliberate "do not guess" on the function that decides which of somebody's
+rules come back.
+
+`gitwork.py` has not had this treatment. Its tests drive real repositories, so a
+run there costs minutes per mutant rather than seconds.
+
+Measuring coverage needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
 the suite drives the scripts as subprocesses, which a plain coverage run cannot
 see — without it the report reads about 66% when the truth is 99%. Do not chase
 that phantom third with new tests; run `make coverage` and look at the real

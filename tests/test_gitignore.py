@@ -1271,3 +1271,153 @@ class TestPostWriteVerification:
         out = run_script("gitignore.py", "--dir", str(cli_repo), "git", "node")
         assert out.returncode == 0, out.stderr
         assert "Verified" in out.stdout
+
+
+class TestGapsFoundByMutationAudit:
+    """Lines the suite ran without checking, found by `python3 tests/mutate.py`.
+
+    Each of these pins a mutation that survived: the code was changed to
+    something wrong, every test still passed, and nobody would have noticed.
+    The docstrings name the mutation so a future audit's report can be read
+    against this class rather than rediscovered.
+    """
+
+    def test_a_rule_is_attributed_to_the_section_it_sits_under(self):
+        """Survived: `startswith("###")` and `endswith("###")` both emptied.
+
+        With either marker emptied, every line reads as a section header, so no
+        pattern is ever recorded and nothing is reported as covered. The section
+        name is what the user is told when a custom rule of theirs is dropped --
+        "covered by Node" -- so getting it wrong is a visible defect, and it was
+        entirely unchecked.
+        """
+        sections = gi.api_pattern_sections(api_block(["node", "python"]))
+        assert sections["node_modules/"] == "Node"
+        assert sections["__pycache__/"] == "Python"
+
+    def test_a_header_needs_both_markers_and_something_between_them(self):
+        """Survived: `startswith("###")`, `endswith("###")` and `len > 6`.
+
+        All three describe the same judgement -- what counts as a section
+        header -- and no test distinguished a header from a line that merely
+        resembles one. Each half of the test below is a line the old suite let
+        the parser classify either way:
+
+        `### not a real header` opens like one and does not close; with the
+        `endswith` check gone it would become a header and re-attribute every
+        rule after it. `trailing marker ###` closes like one and does not open;
+        with `startswith` gone it would stop being recorded as a rule at all.
+        `######` is six characters that strip to nothing, and `###X###` is seven
+        that strip to `X` -- which is exactly where `> 6` draws the line.
+        """
+        block = "\n".join(
+            [
+                f"# Created by {API}/node",
+                "### Node ###",
+                "node_modules/",
+                "### not a real header",
+                "trailing marker ###",
+                "######",
+                "npm-debug.log*",
+                f"# End of {API}/node",
+            ]
+        )
+        sections = gi.api_pattern_sections(block)
+        assert sections["node_modules/"] == "Node"
+        assert sections["trailing marker ###"] == "Node"
+        assert sections["npm-debug.log*"] == "Node"
+
+        seven = f"# Created by {API}/node\n###X###\nrule.log\n# End of {API}/node\n"
+        assert gi.api_pattern_sections(seven)["rule.log"] == "X"
+
+    def test_a_rule_before_any_section_is_attributed_to_the_template(self):
+        """Survived: the `or "template"` fallback emptied.
+
+        A block whose first pattern precedes any `### Name ###` would otherwise
+        be reported as covered by "" -- the user is told their rule was dropped,
+        and not by what.
+        """
+        block = f"# Created by {API}/git\n*.orig\n# End of {API}/git\n"
+        assert gi.api_pattern_sections(block)["*.orig"] == "template"
+
+        kept, removed = gi.dedup_custom(["*.orig"], block)
+        assert kept == []
+        assert removed == [("*.orig", "template")]
+
+    def test_a_custom_rule_touching_the_end_marker_is_not_swallowed(self):
+        """Survived: `lines[end + 1 :]` widened to `lines[end + 2 :]`.
+
+        Almost every file has a blank line after the block, so dropping one line
+        there loses nothing visible -- which is exactly why no test caught it.
+        A file whose first custom rule sits immediately after the marker loses
+        that rule instead.
+        """
+        text = f"# Created by {API}/git\n*.orig\n# End of {API}/git\nmine.log\nalso-mine.log\n"
+        _, _, custom = gi.split_regions(text)
+        assert custom == ["mine.log", "also-mine.log"]
+
+    def test_the_template_list_is_everything_after_the_first_marker(self):
+        """Survived: `line.split(MARK, 1)` widened to `split(MARK, 2)`.
+
+        With one `/api/` in the header the two are identical, which is why
+        nothing noticed. With two -- a hand-written or hand-edited header, since
+        no catalogue name contains a slash -- `maxsplit=1` keeps everything
+        after the first marker as the name, and `maxsplit=2` silently truncates
+        it at the second. That decides which templates the file is recorded as
+        already having, and so what `carried_over` reports back to the user.
+        """
+        text = f"# Created by {API}/node/api/python\nrule.log\n# End of {API}/node/api/python\n"
+        names, _, _ = gi.split_regions(text)
+        assert names == ["node/api/python"]
+
+    def test_a_long_rule_list_still_diffs_exactly(self):
+        """Survives still: `autojunk=False` flipped to `True`, and kept anyway.
+
+        SequenceMatcher's autojunk heuristic discards elements appearing in more
+        than 1% of a sequence once it reaches 200 elements, which is why every
+        other fixture here is too small to reach it. Several inputs designed to
+        trigger it -- 300 rules, half of them duplicates, blank lines at 50%
+        density, a user deleting every duplicate -- produce an identical diff
+        either way, so I could not turn the mutation into an observable
+        difference and am not going to pretend otherwise.
+
+        `autojunk=False` stays: it is a deliberate "do not guess" on a function
+        whose output decides which of somebody's rules are put back. This test
+        stays too, for the thing it does check -- that a .gitignore with a few
+        hundred rules diffs exactly, which nothing else covered.
+        """
+        base = [f"rule-{n}.log" for n in range(300)]
+        theirs = [*base[:150], "inserted-by-the-user.log", *base[150:]]
+
+        result, added, removed = gi.reapply_custom(list(base), base, theirs)
+        assert added == ["inserted-by-the-user.log"]
+        assert removed == []
+        assert "inserted-by-the-user.log" in result
+
+    def test_a_wrong_template_set_is_reported_with_both_lists(self):
+        """Survived: the message text and its `","` separators emptied.
+
+        This is the verification that runs after writing somebody's .gitignore.
+        A test asserting only that *a* problem was reported leaves the report
+        itself unchecked -- and the report is the entire product of a failed
+        verification.
+        """
+        written = api_block(["node", "vim"])
+        problems = gi.verify_bytes(written.encode(), ["git", "python"], [], "the written file")
+        assert len(problems) == 1
+        # Both lists, both separators, and the words that say which is which.
+        # Two templates on each side deliberately: with one, the separator is
+        # never used and emptying it changes nothing.
+        assert problems[0] == "template block lists node,vim, expected git,python"
+
+    def test_an_option_shaped_template_name_is_refused_by_name(self, capsys):
+        """Survived: the `"template name"` label emptied.
+
+        `refuse_option_like` builds its message from that label, so an emptied
+        one leaves "refusing  that looks like an option" -- and the person who
+        has to fix it is not told what kind of value was wrong. Asserting only
+        that it exits leaves the entire message unchecked.
+        """
+        with pytest.raises(SystemExit):
+            gi.normalize_templates(["--facts-out=/etc/passwd"])
+        assert "template name" in capsys.readouterr().err
