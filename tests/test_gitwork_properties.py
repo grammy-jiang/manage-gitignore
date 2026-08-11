@@ -89,7 +89,34 @@ class TestEveryOutcomeHasSomethingToSay:
             assert plan["guidance"] != action, f"{action} has no sentence, only its own name"
             assert len(str(plan["guidance"])) > len(action)
 
-    def test_push_is_permitted_for_exactly_the_actions_that_name_it(self):
+    def test_push_is_permitted_for_exactly_the_actions_the_push_path_executes(self):
+        """`PUSH_PERMITTED` must agree with the code that does the pushing.
+
+        Comparing `describe`'s answer against `PUSH_PERMITTED` would prove
+        nothing: `describe` computes it from that same set, so an action wrongly
+        dropped from it changes both sides together. The independent source is
+        `cmd_push`, which branches on the action and dies on anything it does
+        not recognise. If the two disagree, SKILL.md's procedure skips a push
+        the code would have carried out, or offers one it would refuse.
+
+        Every `stop-` action is excluded because `cmd_push` refuses the whole
+        prefix before those comparisons are reached.
+        """
+        executed = {
+            node.comparators[0].value
+            for node in ast.walk(ast.parse(Path(gitwork.__file__).read_text(encoding="utf-8")))
+            if isinstance(node, ast.FunctionDef) and node.name == "cmd_push"
+            for node in ast.walk(node)
+            if isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "action"
+            and isinstance(node.ops[0], ast.Eq)
+            and isinstance(node.comparators[0], ast.Constant)
+        }
+        executed = {action for action in executed if not str(action).startswith("stop-")}
+        assert executed == gitwork.PUSH_PERMITTED
+
+    def test_the_flag_reports_what_the_permitted_set_says(self):
         for action in sorted(actions_in_source() | set(gitwork.ACTION_GUIDANCE)):
             plan = gitwork.describe({"action": action})
             assert plan["permits_push"] is (action in gitwork.PUSH_PERMITTED)
@@ -150,11 +177,16 @@ class TestDestinationAlwaysNamesWhereCodeWouldGo:
     def test_an_unsettled_first_push_names_every_candidate_with_its_url(self, urls):
         """`remote` is null when several remotes exist and none is `origin`.
         The user is about to be asked which -- so every candidate has to arrive
-        with its URL, not just its nickname."""
+        with its URL, not just its nickname.
+
+        Each pair is asserted as a unit. Checking that every name appears and
+        every URL appears would also pass if the two lists were paired up
+        wrongly -- sorted independently, say -- which is the one mistake here
+        that would actively mislead: the right names beside the wrong URLs.
+        """
         dest = gitwork.destination({"remote": None, "remote_urls": urls})
         for name, url in urls.items():
-            assert name in dest
-            assert url in dest
+            assert f"{name} ({url})" in dest
 
     @PROPERTY
     @given(
