@@ -18,7 +18,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import NoReturn, TypedDict
 
 # Everything invisible or text-moving, written once and shared by both patterns
@@ -184,7 +184,7 @@ def preserved_mode(path: str) -> int:
         return default_file_mode()
 
 
-def write_json(path: str, payload: dict) -> None:
+def write_json(path: str, payload: Mapping[str, object]) -> None:
     """Write a facts file atomically, keeping its permissions.
 
     Several commands update this file in turn; a half-written one would fail the
@@ -195,7 +195,9 @@ def write_json(path: str, payload: dict) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=preserved_mode(path))
 
 
-def write_json_or_die(path: str, payload: dict, die: Callable[[str], NoReturn]) -> None:
+def write_json_or_die(
+    path: str, payload: Mapping[str, object], die: Callable[[str], NoReturn]
+) -> None:
     """write_json with the failure turned into a caller's die().
 
     Mirrors read_bytes_or_die so both scripts report an unwritable facts file

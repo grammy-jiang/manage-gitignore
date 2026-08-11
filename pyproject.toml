@@ -121,6 +121,9 @@ files = [
     "src/manage_gitignore/cli.py",
     "src/manage_gitignore/skill/scripts",
 ]
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_optional = true
+# strict, which subsumes the three flags that used to be listed here
+# (warn_unused_ignores, warn_redundant_casts, no_implicit_optional) and adds the
+# one that matters most for a program that decides whether to mutate somebody's
+# repository: every function is annotated, so there is nowhere the checker is
+# not looking.
+strict = true
