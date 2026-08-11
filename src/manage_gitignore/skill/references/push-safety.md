@@ -36,7 +36,7 @@ separate decision and needs a separate answer.
    those `behind` remote commit(s) and resets the upstream branch to your local
    history — irreversible for anyone who already has them.
 
-3. **Ask with AskUserQuestion**, exactly two options — put the cost in the
+3. **Ask**, exactly two options — put the cost in the
    label itself, using `behind` from the plan, so the risk does not depend on
    the user having read the paragraph above:
    - **Force-push (drops N remote commits)**
@@ -45,7 +45,7 @@ separate decision and needs a separate answer.
 4. **Only on an explicit "Force-push":**
 
    ```bash
-   manage-gitignore git --dir "<repo>" push \
+   python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push \
      --confirm-force --expect-remote "<upstream_sha>" --facts "<facts.json>"
    ```
 

@@ -9,7 +9,7 @@ Color is ON when: stdout is a TTY, TERM != "dumb", and NO_COLOR is unset.
 Override with --color=always|never|auto (default auto) or FORCE_COLOR / NO_COLOR.
 
 Usage:
-  manage-gitignore summary FACTS.json [--color auto|always|never]
+  python3 <skill-dir>/scripts/summary.py FACTS.json [--color auto|always|never]
 
 The facts file is written by `templates --facts-out` and `git facts`, both of
 which build it through the TypedDicts in shared.py. It is not hand-authored --

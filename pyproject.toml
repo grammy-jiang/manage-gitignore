@@ -33,7 +33,19 @@ Repository = "https://github.com/grammy-jiang/manage-gitignore"
 Issues = "https://github.com/grammy-jiang/manage-gitignore/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=5.0", "pytest-xdist>=3.5", "ruff>=0.5", "mypy>=1.8"]
+# PyYAML is a *test* dependency only: SKILL.md's frontmatter is a contract with
+# three products that each parse it with a real YAML parser, so the test that
+# holds it to the Agent Skills spec must parse it the same way. The skill itself
+# still imports nothing outside the standard library -- see tests/test_cli.py.
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
+]
 
 [project.scripts]
 manage-gitignore = "manage_gitignore.cli:main"

@@ -1,8 +1,13 @@
 # Splitting the template question
 
-AskUserQuestion allows at most **4 options per question**, and the free-text
-"Other" always occupies one — so a question holds at most **3 substantive
-entries**. Use as many questions as that takes, up to three.
+Claude Code's AskUserQuestion allows at most **4 options per question**, and the
+free-text "Other" always occupies one — so a question holds at most **3
+substantive entries**. Use as many questions as that takes, up to three.
+
+Under an agent that has no menu tool, ask in prose instead. The 4-option limit
+does not apply, but the splitting below still does: a wall of thirty names is
+not a question a person can answer, and everything under *What may be shortened*
+holds whatever the question looks like.
 
 | Situation | Questions |
 | --- | --- |
@@ -27,5 +32,5 @@ Say what the tool will accept, so a near-miss is not a surprise:
 
 > exact catalogue name(s), comma-separated — ask me to list them if unsure
 
-`manage-gitignore templates` rejects any name that is not in the catalogue, and any name
-beginning with `-`. It does not guess or correct.
+`scripts/templates.py` rejects any name that is not in the catalogue, and any
+name beginning with `-`. It does not guess or correct.
