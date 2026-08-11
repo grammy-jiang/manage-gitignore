@@ -205,23 +205,43 @@ def mutated_source(source: str, index: int, functions: set[str] | None) -> str:
     return ast.unparse(ast.fix_missing_locations(tree))
 
 
-def run_chunk(args: tuple[Path, str, list[int], set[str] | None]) -> list[tuple[int, bool]]:
-    """Run a contiguous block of mutations in one workspace, one after another.
+# pytest's exit codes. Only one of them means "a test failed", and only that one
+# means a mutant was killed. Treating every non-zero status as a kill turns a
+# missing dependency, a collection error or an interrupted run into a perfect
+# score -- the tool reporting success for having done nothing.
+PYTEST_PASSED = 0
+PYTEST_TESTS_FAILED = 1
 
-    Blocks rather than round-robin: a workspace holds exactly one mutated file
-    at a time, so two tasks sharing one would overwrite each other's mutation
-    and report on whichever won the race.
+
+def run_tests(workspace: Path) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *TESTS],
+        cwd=workspace,
+        capture_output=True,
+    )
+
+
+def run_batch(args: tuple[Path, str, list[int], set[str] | None]) -> list[tuple[int, bool]]:
+    """Run a batch of mutations in one workspace, one after another.
+
+    The batches are round-robin slices of the mutation list, so a worker's
+    indexes are not contiguous -- what matters is only that each workspace
+    belongs to exactly one worker. A workspace holds one mutated file at a time,
+    so two tasks sharing one would overwrite each other's mutation and report on
+    whichever won the race.
     """
     workspace, source, indexes, functions = args
     results = []
     for index in indexes:
         (workspace / TARGET).write_text(mutated_source(source, index, functions), encoding="utf-8")
-        done = subprocess.run(
-            [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *TESTS],
-            cwd=workspace,
-            capture_output=True,
-        )
-        results.append((index, done.returncode == 0))
+        done = run_tests(workspace)
+        if done.returncode not in (PYTEST_PASSED, PYTEST_TESTS_FAILED):
+            raise RuntimeError(
+                f"pytest exited {done.returncode} on mutation {index}, which is neither "
+                f"pass nor failure -- the run cannot be scored. Last output:\n"
+                f"{done.stdout.decode(errors='replace')[-2000:]}"
+            )
+        results.append((index, done.returncode == PYTEST_PASSED))
     return results
 
 
@@ -252,17 +272,32 @@ def main() -> int:
             shutil.copytree(REPO, workspace, ignore=shutil.ignore_patterns(".git", "mutants"))
             workspaces.append(workspace)
 
+        # Before mutating anything: do the tests pass as they are? Without this,
+        # a missing dependency or a broken fixture makes every mutant look
+        # killed, and the report says the suite is perfect precisely when it is
+        # not running. The baseline runs in a workspace no mutation has touched.
+        baseline = run_tests(workspaces[0])
+        if baseline.returncode != PYTEST_PASSED:
+            print(
+                f"the tests do not pass unmutated (pytest exited {baseline.returncode}), "
+                f"so nothing here would mean anything:\n"
+                f"{baseline.stdout.decode(errors='replace')[-2000:]}",
+                file=sys.stderr,
+            )
+            return 2
+        print("  baseline: the suite passes unmutated")
+
         survivors: list[Mutation] = []
-        chunks: list[list[int]] = [[] for _ in range(args.workers)]
+        batches: list[list[int]] = [[] for _ in range(args.workers)]
         for position, mutation in enumerate(found):
-            chunks[position % args.workers].append(mutation.index)
+            batches[position % args.workers].append(mutation.index)
         work = [
-            (workspaces[worker], source, chunk, functions)
-            for worker, chunk in enumerate(chunks)
-            if chunk
+            (workspaces[worker], source, batch, functions)
+            for worker, batch in enumerate(batches)
+            if batch
         ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for finished, batch in enumerate(pool.map(run_chunk, work), 1):
+            for finished, batch in enumerate(pool.map(run_batch, work), 1):
                 survivors.extend(found[index] for index, survived in batch if survived)
                 print(f"  worker {finished}/{len(work)} done, {len(survivors)} survived so far")
 
