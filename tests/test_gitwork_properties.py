@@ -297,7 +297,8 @@ class TestGapsFoundByMutationAudit:
     def test_an_upstream_without_a_known_url_is_still_a_sentence(self):
         """The other side of that conditional: no URL to name, and the result
         must still read as a destination rather than trailing an empty pair."""
-        assert gitwork.destination({"remote": "origin", "merge_ref": "refs/heads/x"}) == "origin/x"
+        dest = gitwork.destination({"remote": "origin", "merge_ref": "refs/heads/x"})
+        assert dest == "origin/x"
 
     def test_the_unsettled_list_reads_as_a_choice(self):
         """Survived: the `", "` between candidates and the `"one of "` prefix.
