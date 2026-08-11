@@ -52,8 +52,8 @@ import json
 import os
 import re
 import sys
-from collections.abc import Sequence
-from typing import NoReturn
+from collections.abc import Mapping, Sequence
+from typing import Any, NoReturn
 
 from shared import (  # one sanitiser, shared by every tool in this skill
     Facts,
@@ -129,7 +129,7 @@ def emit_section(
         lines.append(f"{' ' * LABEL_INDENT}{pal.label(label.ljust(width))}{' ' * gap}{value}")
 
 
-def names(items, pal: Pal, kind: str | None = None) -> str:
+def names(items: Sequence[object] | None, pal: Pal, kind: str | None = None) -> str:
     if not items:
         return pal.dim("(none)")
     if kind == "add":
@@ -139,7 +139,7 @@ def names(items, pal: Pal, kind: str | None = None) -> str:
     return ", ".join(clean(n) for n in items)
 
 
-def color_diffstat(text, pal: Pal) -> str:
+def color_diffstat(text: object, pal: Pal) -> str:
     """Colour a diffstat, in either shape it can arrive in.
 
     `git diff --stat` says "6 insertions(+), 5 deletions(-)"; a hand-written or
@@ -171,7 +171,11 @@ def value_column(labels: Sequence[str]) -> int:
     return LABEL_INDENT + max(len(label) for label in labels) + LABEL_GAP
 
 
-def render(facts: Facts | dict, pal: Pal) -> str:
+def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
+    # `Any` in the values, not `object`: this walks a JSON document whose shape
+    # the module docstring says it trusts, indexing and `.get`-ing its way down.
+    # Typing the values as `object` would need a cast at every step, and a cast
+    # asserts the same thing with more ceremony and no more checking.
     lines: list[str] = []
     title = clean(facts.get("title", "manage-gitignore - run summary"))
     lines.append(pal.title(title))

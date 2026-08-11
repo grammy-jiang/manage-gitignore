@@ -31,7 +31,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from shared import (
     Facts,
@@ -1005,7 +1005,7 @@ def main() -> int:
         "--dir", default=argparse.SUPPRESS, help="repository root"
     )  # SUPPRESS: only set when actually given, so the pre-subcommand value survives
 
-    def subcommand(name: str, **kwargs) -> argparse.ArgumentParser:
+    def subcommand(name: str, **kwargs: Any) -> argparse.ArgumentParser:
         """A subparser that inherits --dir and, crucially, allow_abbrev=False.
 
         add_parser does not inherit the parent's setting, so without this an
