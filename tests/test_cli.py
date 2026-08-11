@@ -298,7 +298,13 @@ class TestLinkInspection:
 
     def test_a_relative_link_to_the_packaged_skill_is_ours(self, skills):
         """Resolved against the link's own directory, not the process cwd."""
-        rel = os.path.relpath(cli.skill_source(), skills)
+        try:
+            rel = os.path.relpath(cli.skill_source(), skills)
+        except ValueError:  # pragma: no cover - only on Windows, across drives
+            # There is no relative path from C: to D:, so there is no link of
+            # this shape to inspect. Nothing about `is_our_link` is untested as
+            # a result: the absolute case runs everywhere.
+            pytest.skip("checkout and temporary directory are on different drives")
         (skills / cli.SKILL_NAME).symlink_to(rel, target_is_directory=True)
         assert cli.is_our_link(skills / cli.SKILL_NAME) is True
 
@@ -474,8 +480,14 @@ class TestDetectedInstall:
         home.mkdir()
         bindir = tmp_path / "bin"
         bindir.mkdir()
+        # Both, because `Path.home()` reads a different variable per platform:
+        # HOME on POSIX, USERPROFILE on Windows. Setting only HOME left the
+        # Windows runs detecting the real machine's agents and installing into
+        # the runner's actual home directory.
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         return home
 
     def test_links_where_the_detected_agent_looks(self, isolated, capsys):
@@ -580,8 +592,14 @@ class TestSweepingUninstall:
         home.mkdir()
         bindir = tmp_path / "bin"
         bindir.mkdir()
+        # Both, because `Path.home()` reads a different variable per platform:
+        # HOME on POSIX, USERPROFILE on Windows. Setting only HOME left the
+        # Windows runs detecting the real machine's agents and installing into
+        # the runner's actual home directory.
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         return home
 
     def test_removes_links_for_agents_no_longer_installed(self, isolated):
@@ -597,7 +615,7 @@ class TestSweepingUninstall:
     def test_it_leaves_a_stranger_alone_and_exits_non_zero(self, isolated, capsys):
         cli.main(["install", "--all"])
         stranger = isolated / ".agents" / "skills" / cli.SKILL_NAME
-        stranger.unlink()
+        cli.remove_link(stranger)  # a directory symlink; Windows needs rmdir
         stranger.mkdir()
         assert cli.main(["uninstall"]) == 1
         assert stranger.is_dir()
@@ -724,6 +742,11 @@ class TestDispatch:
         assert str(skills / cli.SKILL_NAME) in out
         assert str(cli.skill_source()) in out
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="chmod does not remove write access on Windows; the ACL equivalent is not "
+        "what this test is about",
+    )
     def test_an_unwritable_skills_directory_is_an_error_not_a_traceback(self, tmp_path, capsys):
         """OSError is caught alongside FileExistsError; a permission problem
         should read like a refusal, not a crash."""
