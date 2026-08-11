@@ -199,16 +199,18 @@ first two audits at four times the scale: string literals and **dict keys**.
 `facts.get("commit")` mutated to `facts.get("")` makes a whole section vanish,
 and every test went on passing because each looked for one row rather than at
 the document. So the tests look at the document now — six golden comparisons
-against fixtures chosen to reach different branches. **189/198.**
+against fixtures chosen to reach different branches. **189/198**, and **190/198**
+once `tests/test_summary_properties.py` poisoned every externally-derived field
+rather than three.
 
-The nine that remain are recorded rather than chased, because each needs a
+The eight that remain are recorded rather than chased, because each needs a
 fixture built to defeat it rather than to describe a run:
 
 | Line | Why it survives |
 | --- | --- |
 | `write.get("mode", "new")` | the default is only ever compared against `"overwrite"`, so emptying it changes nothing — equivalent |
-| `scan.get("gitignore", "none")`, `("prev_templates_count", "?")` | reached only when the key is absent *and* the surrounding state is present |
-| `merge.get("esc_bytes", 0)`, `commit.get("choice", …)` | the fixtures supply the value the default already produces |
+| `scan.get("gitignore", "none")`, `("prev_templates_count", "?")`, `("custom_lines", 0)` | reached only when the key is absent *and* the surrounding state is present |
+| `commit.get("choice", …)` | the fixtures supply the value the default already produces |
 | `len(parts) > 1`, `strict=True`, `and` in the NET guard | need a fixture built around the boundary rather than around a run |
 
 Four audits, one finding: what goes unchecked is not the logic, it is the

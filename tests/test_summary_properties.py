@@ -18,6 +18,7 @@ Both are pure. No repository, no network, no subprocess.
 
 from __future__ import annotations
 
+import copy
 import re
 
 from hypothesis import given, settings
@@ -39,19 +40,27 @@ PROPERTY = settings(deadline=None, max_examples=150)
 # module's own pattern caught everything cannot fail. Narrowing the pattern
 # would narrow the check with it. This list is the independent statement of what
 # must never survive.
-MUST_NOT_SURVIVE = (
-    "\n",  # forges a row
-    "\r",
-    "\x1b",  # repaints the terminal
-    "\x9b",  # the same, as a single C1 codepoint
-    "\x00",
-    "\x7f",
-    chr(0x202E),  # right-to-left override
-    chr(0x200B),  # zero-width space
-    chr(0x2028),  # str.splitlines() treats this as a line break
-    chr(0xFEFF),
-    chr(0xE0041),  # tag block: hidden "A"
-    chr(0xFE0F),  # variation selector
+#
+# Written as the complete ranges rather than one example per technique. A
+# representative list would miss a range narrowed at its boundary -- allowing
+# U+2066 while still rejecting U+2069 -- and those characters reorder text just
+# as well as the ones that were sampled.
+FORBIDDEN_RANGES = (
+    (0x0000, 0x001F),  # C0, which includes newline, carriage return and ESC
+    (0x007F, 0x009F),  # DEL and the C1 block, where U+009B is a one-character CSI
+    (0x061C, 0x061C),  # Arabic letter mark
+    (0x200B, 0x200F),  # zero-width spaces and joiners, and the bidi marks
+    (0x2028, 0x2029),  # line and paragraph separators: str.splitlines() breaks on these
+    (0x202A, 0x202E),  # bidi embeddings and overrides
+    (0x2060, 0x2064),  # word joiner and the invisible operators
+    (0x2066, 0x2069),  # bidi isolates
+    (0xFE00, 0xFE0F),  # variation selectors
+    (0xFEFF, 0xFEFF),  # BOM / zero-width no-break space
+    (0xE0000, 0xE007F),  # the tag block, which can carry hidden ASCII
+    (0xE0100, 0xE01EF),  # variation selectors, supplement
+)
+MUST_NOT_SURVIVE = tuple(
+    chr(code) for start, end in FORBIDDEN_RANGES for code in range(start, end + 1)
 )
 HOSTILE_CHAR = st.sampled_from(MUST_NOT_SURVIVE)
 
@@ -88,8 +97,22 @@ class TestTheSanitiserGuarantee:
         """
         cleaned = shared.clean(value)
         assert not shared.CONTROL_CHARS.search(cleaned)
-        for char in MUST_NOT_SURVIVE:
-            assert char not in cleaned
+        assert not set(cleaned) & set(MUST_NOT_SURVIVE)
+
+    def test_every_forbidden_codepoint_is_neutralised(self):
+        """Not sampled -- all of them, one at a time.
+
+        Hypothesis draws from `MUST_NOT_SURVIVE`, so a range narrowed at its
+        boundary would be found only if that particular codepoint happened to be
+        drawn. There are around seven hundred of them and `clean` is a regex
+        substitution, so checking every one costs less than a second.
+        """
+        survived = [
+            f"U+{ord(char):04X}"
+            for char in MUST_NOT_SURVIVE
+            if char in shared.clean(f"before{char}after")
+        ]
+        assert survived == []
 
     @PROPERTY
     @given(value=st.one_of(POISONED, st.text(max_size=40)))
@@ -153,23 +176,137 @@ class TestTheSummaryCannotBeForged:
         facts[section] = {**facts[section], key: value}
         return facts
 
-    @PROPERTY
-    @given(value=POISONED)
-    def test_a_hostile_commit_subject_cannot_add_a_line(self, value):
-        """The subject is typed by a person and echoed back for approval. A
-        newline in it would let them write a row the tool never emitted."""
-        baseline = self._rendered(self._poison(("commit", "subject"), "ordinary subject"))
-        poisoned = self._rendered(self._poison(("commit", "subject"), value))
-        assert len(poisoned.splitlines()) == len(baseline.splitlines())
+    # Every value the renderer takes from outside this tool, written as the path
+    # it arrives on. `foo[]` is a list, and a path continuing past it addresses a
+    # dict inside that list.
+    #
+    # Enumerated rather than sampled, because the guarantee is about *every*
+    # value: a path missing from this list is a field nothing checks. The first
+    # version poisoned three fields and left the rest to the golden fixtures,
+    # which use benign strings -- so dropping `clean` from `commit.push.remote`
+    # or from a recommendation's `reason` changed no test at all.
+    EXTERNAL_PATHS: tuple[str, ...] = (
+        "title",
+        "notes[]",
+        "scan.detected[]",
+        "scan.prev_templates_count",
+        "scan.custom_lines",
+        "templates.total",
+        "templates.always_on[]",
+        "templates.recommended[].name",
+        "templates.recommended[].reason",
+        "templates.carried_over[]",
+        "templates.added[]",
+        "templates.removed[]",
+        "merge.esc_bytes",
+        "merge.custom_kept",
+        "merge.custom_removed[].line",
+        "merge.custom_removed[].covered_by",
+        "review.negations[]",
+        "review.broad[]",
+        "write.path",
+        "write.reason",
+        "commit.choice",
+        "commit.subject",
+        "commit.hash",
+        "commit.scope",
+        "commit.untouched",
+        "commit.push.remote",
+        "commit.push.branch",
+        "commit.push.sha",
+        "net.prev_count",
+        "net.new_count",
+        "net.diffstat",
+    )
+
+    # Values that decide only whether a field is reached at all: an overwrite
+    # reason is not rendered for a newly created file, and `esc_bytes` appears
+    # only when the block is verbatim. Set on every case so each path above is
+    # live -- and `test_every_field_in_that_list_actually_reaches_the_output` is
+    # what proves they are, rather than this comment.
+    GATES: tuple[tuple[str, str, object], ...] = (
+        ("write", "mode", "overwrite"),
+        ("merge", "verbatim", True),
+        ("scan", "gitignore", "existing"),
+    )
+
+    @classmethod
+    def _with(cls, path: str, value: object):
+        """FULL_FACTS with the value at `path` replaced.
+
+        Deep-copied, so poisoning a nested field can never leak into the next
+        example through a shared dict.
+        """
+        facts = copy.deepcopy(dict(FULL_FACTS))
+        for section, key, gate in cls.GATES:
+            facts[section] = {**(facts.get(section) or {}), key: gate}
+
+        node = facts
+        segments = path.split(".")
+        for index, segment in enumerate(segments):
+            listed = segment.endswith("[]")
+            key = segment[:-2] if listed else segment
+            if index == len(segments) - 1:
+                node[key] = [value] if listed else value
+            elif listed:
+                # One entry is enough: the property is about a single value, and
+                # a second would only test the same code path twice.
+                child: dict = {}
+                node[key] = [child]
+                node = child
+            else:
+                child = dict(node.get(key) or {})
+                node[key] = child
+                node = child
+        return facts
+
+    def test_no_external_field_can_forge_anything_with_any_forbidden_codepoint(self):
+        """The whole grid: every path against every codepoint, not a sample.
+
+        A property drawing one (path, codepoint) pair per example cannot cover
+        thirty-one paths times four hundred-odd codepoints in 150 examples, so a
+        field that lost its `clean` would be caught only if that exact pair
+        happened to be drawn. Measured, not assumed: with the sampled version
+        alone, removing `clean` from `write.path`, from `merge.esc_bytes` and
+        from a recommendation's `reason` left the suite green.
+
+        The grid is about fourteen thousand renders and runs in under a second,
+        which is cheaper than reasoning about whether sampling was lucky.
+        """
+        failures = []
+        for path in self.EXTERNAL_PATHS:
+            baseline = len(self._rendered(self._with(path, "ordinary")).splitlines())
+            for char in MUST_NOT_SURVIVE:
+                rendered = self._rendered(self._with(path, f"before{char}after"))
+                forged = len(rendered.splitlines()) != baseline or any(
+                    shared.SUSPICIOUS_CHARS.search(line) for line in rendered.splitlines()
+                )
+                if forged:
+                    failures.append(f"{path} U+{ord(char):04X}")
+        assert not failures, f"{len(failures)} forged: {failures[:10]}"
 
     @PROPERTY
-    @given(value=POISONED)
-    def test_a_hostile_detected_name_cannot_add_a_line(self, value):
-        """These come from scanning the repository, so the file names in them
-        are chosen by whoever wrote the repository."""
-        baseline = self._rendered(self._poison(("scan", "detected"), ["ordinary.json"]))
-        poisoned = self._rendered(self._poison(("scan", "detected"), [value]))
+    @given(field=st.sampled_from(EXTERNAL_PATHS), value=POISONED)
+    def test_no_externally_derived_field_can_forge_a_line_in_ordinary_text(self, field, value):
+        """What the grid above does not vary: the text around the hostile
+        character. A real value is a file name or a commit subject with
+        something buried in it, not `before<char>after`, and a renderer that
+        handled the fixed shape but not an arbitrary one would pass the grid."""
+        baseline = self._rendered(self._with(field, "ordinary"))
+        poisoned = self._rendered(self._with(field, value))
         assert len(poisoned.splitlines()) == len(baseline.splitlines())
+
+    def test_every_field_in_that_list_actually_reaches_the_output(self):
+        """The two properties above are worth nothing for a field whose value
+        never arrives. A wrong key or a wrong shape here would not fail them --
+        it would quietly stop testing that field, which is the failure mode this
+        whole file exists to avoid."""
+        missing = [
+            path
+            for path in self.EXTERNAL_PATHS
+            if "MARKERVALUE" not in self._rendered(self._with(path, "MARKERVALUE"))
+        ]
+        assert missing == []
 
     @PROPERTY
     @given(subject=POISONED, detected=POISONED, title=POISONED)
