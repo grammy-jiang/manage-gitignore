@@ -419,6 +419,27 @@ class TestDetectedInstall:
         assert not (isolated / ".claude" / "skills").exists()
         assert "Would link" in capsys.readouterr().out
 
+    def test_dry_run_reports_a_refusal_rather_than_promising_the_link(self, isolated, capsys):
+        """A dry run is checked precisely so a refusal is not a surprise later.
+
+        Defect this pins: `--dry-run` printed "Would link" for a destination the
+        real run would refuse, and exited 0 while the real run exits 1.
+        """
+        (isolated / ".claude").mkdir()
+        blocked = isolated / ".claude" / "skills" / cli.SKILL_NAME
+        blocked.mkdir(parents=True)
+        assert cli.main(["install", "--dry-run"]) == 1
+        captured = capsys.readouterr()
+        assert "Would link" not in captured.out
+        assert "already exists and is not a symlink" in captured.err
+        assert list(os.listdir(blocked)) == []
+
+    def test_dry_run_with_force_promises_what_force_would_do(self, isolated, capsys):
+        (isolated / ".claude").mkdir()
+        (isolated / ".claude" / "skills" / cli.SKILL_NAME).mkdir(parents=True)
+        assert cli.main(["install", "--dry-run", "--force"]) == 0
+        assert "Would link" in capsys.readouterr().out
+
     def test_one_refused_target_does_not_cost_the_others(self, isolated, capsys):
         """A refusal on one directory must not silently skip the rest, and must
         still be an exit code rather than a line on stdout."""
@@ -481,6 +502,30 @@ class TestSweepingUninstall:
         out = capsys.readouterr().out
         assert "not detected" in out
         assert not (isolated / ".agents" / "skills" / cli.SKILL_NAME).exists()
+
+    def test_dry_run_reports_a_refusal_rather_than_nothing_to_do(self, isolated, capsys):
+        """Defect this pins: any non-symlink read as "Nothing at ...", so a real
+        directory in the way -- which the real run refuses -- looked like a
+        clean no-op."""
+        stranger = isolated / ".claude" / "skills" / cli.SKILL_NAME
+        stranger.mkdir(parents=True)
+        assert cli.main(["uninstall", "--dry-run"]) == 1
+        captured = capsys.readouterr()
+        # The other swept directory is genuinely empty and says so; the one in
+        # the way must not be reported as a clean no-op alongside it.
+        assert str(stranger) not in captured.out
+        assert "not a symlink" in captured.err
+        assert stranger.is_dir()
+
+    def test_dry_run_reports_a_foreign_link_it_would_not_touch(self, isolated, capsys):
+        elsewhere = isolated / "elsewhere"
+        elsewhere.mkdir()
+        link = isolated / ".agents" / "skills" / cli.SKILL_NAME
+        link.parent.mkdir(parents=True)
+        link.symlink_to(elsewhere, target_is_directory=True)
+        assert cli.main(["uninstall", "--dry-run"]) == 1
+        assert "not a packaged skill" in capsys.readouterr().err
+        assert link.is_symlink()
 
     def test_dry_run_reports_both_states_and_removes_nothing(self, isolated, capsys):
         cli.main(["install", "--agent", "claude"])

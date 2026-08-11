@@ -79,6 +79,28 @@ def is_our_link(link: Path) -> bool:
     return resolved.name == "skill" and (resolved / "SKILL.md").is_file()
 
 
+def install_refusal(dest: Path, *, force: bool) -> str | None:
+    """Why `install` would refuse to write `dest`, or None if it would proceed.
+
+    Split out from `install` so that `--dry-run` answers the same question the
+    real run does. A dry run that reports work it would refuse to do is worse
+    than no dry run: it is the one output a person checks *because* they do not
+    want to find out the hard way.
+    """
+    if dest.is_symlink():
+        if is_our_link(dest) or force:
+            return None  # installing over our own link is idempotent
+        return f"{dest} is a symlink to something else -- re-run with --force to replace it"
+    if dest.exists() and not force:
+        # Never silently delete a real directory: it may be a hand-written skill,
+        # or an older copy holding files this package did not put there.
+        return (
+            f"{dest} already exists and is not a symlink -- inspect it, then either "
+            "remove it yourself or re-run with --force"
+        )
+    return None
+
+
 def install(dest_root: Path, *, force: bool) -> Path:
     """Symlink the packaged skill into one skills directory.
 
@@ -89,26 +111,39 @@ def install(dest_root: Path, *, force: bool) -> Path:
     source = skill_source()
     dest = dest_root / SKILL_NAME
 
+    refusal = install_refusal(dest, force=force)
+    if refusal is not None:
+        raise FileExistsError(refusal)
     if dest.is_symlink():
-        if is_our_link(dest) or force:
-            dest.unlink()  # installing over our own link is idempotent
-        else:
-            raise FileExistsError(
-                f"{dest} is a symlink to something else -- re-run with --force to replace it"
-            )
+        dest.unlink()
     elif dest.exists():
-        # Never silently delete a real directory: it may be a hand-written skill,
-        # or an older copy holding files this package did not put there.
-        if not force:
-            raise FileExistsError(
-                f"{dest} already exists and is not a symlink -- inspect it, then either "
-                "remove it yourself or re-run with --force"
-            )
         shutil.rmtree(dest)
 
     dest_root.mkdir(parents=True, exist_ok=True)
     dest.symlink_to(source, target_is_directory=True)
     return dest
+
+
+def uninstall_refusal(dest: Path, *, force: bool) -> str | None:
+    """Why `uninstall` would refuse to remove `dest`, or None if it would not.
+
+    None also covers "there is nothing there", which is not a refusal --
+    `uninstall` reports that and succeeds. Shared with `--dry-run` for the same
+    reason as `install_refusal`.
+    """
+    if not dest.is_symlink():
+        if not dest.exists():
+            return None
+        return (
+            f"{dest} is a directory, not a symlink -- `install` never creates one, so this "
+            "is not ours to remove. Delete it yourself if you no longer want it."
+        )
+    if not is_our_link(dest) and not force:
+        return (
+            f"{dest} points at {link_target(dest)}, which is not a packaged skill -- "
+            "re-run with --force if you are sure"
+        )
+    return None
 
 
 def uninstall(dest_root: Path, *, force: bool) -> Path | None:
@@ -118,18 +153,11 @@ def uninstall(dest_root: Path, *, force: bool) -> Path | None:
     link pointing elsewhere is not this package's to remove.
     """
     dest = dest_root / SKILL_NAME
-    if not dest.is_symlink() and not dest.exists():
-        return None
+    refusal = uninstall_refusal(dest, force=force)
+    if refusal is not None:
+        raise FileExistsError(refusal)
     if not dest.is_symlink():
-        raise FileExistsError(
-            f"{dest} is a directory, not a symlink -- `install` never creates one, so this "
-            "is not ours to remove. Delete it yourself if you no longer want it."
-        )
-    if not is_our_link(dest) and not force:
-        raise FileExistsError(
-            f"{dest} points at {link_target(dest)}, which is not a packaged skill -- "
-            "re-run with --force if you are sure"
-        )
+        return None
     dest.unlink()  # the link only; whatever it pointed at is untouched
     return dest
 
@@ -203,7 +231,9 @@ def _parser(prog: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument("--dest", help="one skills directory, instead of detecting anything")
     parser.add_argument("--force", action="store_true", help="act even on something not ours")
     parser.add_argument(
-        "--dry-run", action="store_true", help="print what would happen, change nothing"
+        "--dry-run",
+        action="store_true",
+        help="change nothing; print what would happen, refusals included",
     )
     return parser
 
@@ -229,7 +259,13 @@ def cmd_install(argv: list[str]) -> int:
     linked: list[Target] = []
     for target in targets:
         if args.dry_run:
-            print(f"Would link {target.path / SKILL_NAME} -> {skill_source()}{_for_label(target)}")
+            dest = target.path / SKILL_NAME
+            refusal = install_refusal(dest, force=args.force)
+            if refusal is not None:
+                print(f"manage-gitignore: {refusal}", file=sys.stderr)
+                failed = True
+                continue
+            print(f"Would link {dest} -> {skill_source()}{_for_label(target)}")
             continue
         try:
             dest = install(target.path, force=args.force)
@@ -265,8 +301,14 @@ def cmd_uninstall(argv: list[str]) -> int:
     removed: list[Path] = []
     for target in targets:
         if args.dry_run:
-            state = "would remove" if (target.path / SKILL_NAME).is_symlink() else "nothing at"
-            print(f"{state.capitalize()} {target.path / SKILL_NAME}{_for_label(target)}")
+            dest = target.path / SKILL_NAME
+            refusal = uninstall_refusal(dest, force=args.force)
+            if refusal is not None:
+                print(f"manage-gitignore: {refusal}", file=sys.stderr)
+                failed = True
+                continue
+            state = "Would remove" if dest.is_symlink() else "Nothing at"
+            print(f"{state} {dest}{_for_label(target)}")
             continue
         try:
             gone = uninstall(target.path, force=args.force)
