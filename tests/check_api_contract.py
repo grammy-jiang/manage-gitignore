@@ -29,6 +29,13 @@ from __future__ import annotations
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# The scripts import each other by plain module name, resolved from their own
+# directory the way `python3 <dir>/foo.py` resolves anything. Doing the same
+# here is what makes the shebang honest: `./tests/check_api_contract.py` works
+# from a bare checkout, with no PYTHONPATH to remember.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/manage_gitignore/skill/scripts"))
 
 import templates
 
@@ -40,12 +47,17 @@ REACHABLE_TIMEOUT = 20
 
 
 def reachable() -> str | None:
-    """None if the API answered, else why not.
+    """None if the service answered at all, else why it did not.
 
-    Asked separately, and before the real fetch, so that "the service is down"
-    and "the service changed" are different outcomes. `fetch_text` dies the same
-    way for both, and a watcher that cried wolf every time a network blipped
-    would be switched off within a month.
+    Asked separately from the real fetch so that "the service is down" and "the
+    service changed" are different outcomes: `fetch_text` dies the same way for
+    both, and a watcher that cried wolf every time a network blipped would be
+    switched off within a month.
+
+    A 4xx is deliberately *not* unreachable. If the endpoint moved, the API
+    answers 404 and that is precisely the change this exists to notice -- so it
+    falls through to the contract check and fails there, loudly. Only a
+    transport failure or a 5xx counts as the service being unavailable.
     """
     request = urllib.request.Request(  # noqa: S310 - the URL is this module's constant
         f"{templates.API}/{','.join(WANTED)}",
@@ -53,8 +65,12 @@ def reachable() -> str | None:
     )
     try:
         with urllib.request.urlopen(request, timeout=REACHABLE_TIMEOUT) as response:  # noqa: S310
-            if response.status != 200:
+            if response.status >= 500:
                 return f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        if exc.code < 500:
+            return None  # it answered, and the answer is the contract check's business
+        return f"HTTP {exc.code}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return str(exc)
     return None
@@ -73,6 +89,15 @@ def main() -> int:
         text = templates.fetch_text(",".join(WANTED))
         templates.check_api_block(text, WANTED)
     except SystemExit as exc:
+        # The probe and the fetch are two separate requests, so the service can
+        # go away between them -- and `fetch_text` dies the same way whether
+        # curl failed or the response was wrong. Asking again is what tells
+        # those apart; without it a transient outage is reported as a changed
+        # contract, which is the one thing this must not cry wolf about.
+        gone = reachable()
+        if gone is not None:
+            print(f"lost {templates.API} mid-check: {gone}", file=sys.stderr)
+            return 2
         print(f"the API contract this skill depends on has changed: {exc}", file=sys.stderr)
         return 1
 

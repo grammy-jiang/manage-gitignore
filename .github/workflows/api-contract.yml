@@ -40,15 +40,15 @@ jobs:
         with:
           python-version: "3.13"
 
-      # No `pip install`: the check imports the skill's own script by path, the
-      # same way the skill does, and that script needs nothing but the standard
-      # library. If this step ever needs a dependency, something has gone wrong
-      # with rule 3 rather than with this workflow.
+      # No `pip install` and no PYTHONPATH: the check puts the scripts directory
+      # on sys.path itself, the way the scripts resolve each other, and needs
+      # nothing but the standard library. If this step ever needs a dependency,
+      # rule 3 has been broken rather than this workflow.
       - name: Ask the API
         id: contract
         run: |
           set +e
-          PYTHONPATH=src/manage_gitignore/skill/scripts python3 tests/check_api_contract.py
+          python3 tests/check_api_contract.py
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       # Unreachable is not a contract change. Saying so out loud, and passing,
