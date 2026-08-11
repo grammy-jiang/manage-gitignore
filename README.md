@@ -1,5 +1,18 @@
 # manage-gitignore
 
+[![PyPI](https://img.shields.io/pypi/v/manage-gitignore.svg)](https://pypi.org/project/manage-gitignore/)
+[![Python](https://img.shields.io/pypi/pyversions/manage-gitignore.svg)](https://pypi.org/project/manage-gitignore/)
+[![Downloads](https://img.shields.io/pypi/dm/manage-gitignore.svg)](https://pypistats.org/packages/manage-gitignore)
+[![Runtime dependencies](https://img.shields.io/badge/runtime%20deps-none-brightgreen.svg)](#contributing)
+[![License](https://img.shields.io/pypi/l/manage-gitignore.svg)](LICENSE)
+
+[![CI](https://github.com/grammy-jiang/manage-gitignore/actions/workflows/ci.yml/badge.svg)](https://github.com/grammy-jiang/manage-gitignore/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25%20per%20file-brightgreen.svg)](tests/check_coverage.py)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![mypy](https://img.shields.io/badge/mypy-checked-2A6DB2.svg)](https://mypy-lang.org/)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen.svg?logo=pre-commit)](https://pre-commit.com/)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-spec%20compliant-6E56CF.svg)](https://agentskills.io/specification)
+
 Build a repository's `.gitignore` from [gitignore.io](https://www.toptal.com/developers/gitignore),
 writing the template block **verbatim** and preserving the repo's own custom rules —
 then review the diff and, with confirmation, commit and push it.
@@ -56,9 +69,41 @@ Ask your agent, in whatever words you would use anyway:
 >
 > What does my `.gitignore` actually cover?
 
-All three match a skill against its description, so asking for the job is
-usually enough. To name it outright: `/manage-gitignore` in Claude Code,
-`$manage-gitignore` in Codex, `/skills` in Copilot.
+All three match a skill against its `description`, so asking for the job is
+usually enough — none of them needs the skill named.
+
+### Calling it by name
+
+| Agent | In a session | How the mention works |
+| --- | --- | --- |
+| Claude Code | `/manage-gitignore` | pick it from the `/` menu, or type the name |
+| Codex | `$manage-gitignore` | type `$` for the list, or `/skills` for the picker |
+| GitHub Copilot CLI | `/manage-gitignore` | named inside the sentence: `Use the /manage-gitignore skill to …` |
+
+From a shell, with no interactive session:
+
+```bash
+claude   -p '/manage-gitignore give this repo a proper .gitignore'
+codex    exec '$manage-gitignore add Rust and JetBrains ignores'
+copilot  -p 'Use the /manage-gitignore skill to show what my .gitignore covers'
+```
+
+To confirm the agent can see it: `/skills` in Codex or Copilot, `copilot skill
+list` from a shell, and the `/` menu in Claude Code. A skill installed mid-session
+needs `/skills reload` in Copilot, and a restart in Claude Code or Codex.
+
+### Two things that differ by agent
+
+**Codex sandboxes the network.** The skill fetches from gitignore.io with
+`curl`, so a run under a sandbox that denies network — `codex exec`'s default —
+reports the refusal and stops rather than inventing a `.gitignore`. Give it
+`--sandbox workspace-write` with network enabled, or an approval mode that
+allows the fetch.
+
+**Only Claude Code has a menu.** There, confirmations arrive as a multiple-choice
+prompt; under Codex and Copilot the same questions are asked in prose and
+answered in text. Nothing is skipped either way — the skill never commits or
+pushes without an explicit answer.
 
 The skill takes it from there: it scans the repository, proposes a template set
 with the file that justifies each one, asks you to confirm, writes the file
