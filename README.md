@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/pypi/l/manage-gitignore.svg)](LICENSE)
 
 [![CI](https://github.com/grammy-jiang/manage-gitignore/actions/workflows/ci.yml/badge.svg)](https://github.com/grammy-jiang/manage-gitignore/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25%20per%20file-brightgreen.svg)](tests/check_coverage.py)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A595%25%20per%20file-brightgreen.svg)](tests/check_coverage.py)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![mypy](https://img.shields.io/badge/mypy-checked-2A6DB2.svg)](https://mypy-lang.org/)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen.svg?logo=pre-commit)](https://pre-commit.com/)

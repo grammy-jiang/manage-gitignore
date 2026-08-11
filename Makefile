@@ -7,8 +7,8 @@ help:
 	@echo "typecheck      mypy"
 	@echo "verify         lint + typecheck + test  (run before shipping a change)"
 	@echo "build          sdist + wheel into dist/"
-	@echo "install        symlink the skill into ~/.claude/skills/"
-	@echo "uninstall      remove that symlink again"
+	@echo "install        link the skill wherever the agents on this machine look"
+	@echo "uninstall      remove those links again"
 
 test:
 	python3 -m pytest
@@ -21,7 +21,7 @@ coverage:
 	COVERAGE_FILE=$(CURDIR)/.coverage MG_COVER_SUBPROCESS=1 \
 	    python3 -m pytest --cov --cov-report= -q
 	COVERAGE_FILE=$(CURDIR)/.coverage python3 -m coverage report
-	COVERAGE_FILE=$(CURDIR)/.coverage python3 tests/check_coverage.py --min 90
+	COVERAGE_FILE=$(CURDIR)/.coverage python3 tests/check_coverage.py --min 95
 
 lint:
 	python3 -m ruff check .

@@ -20,6 +20,7 @@ jobs:
   test:
     name: Test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +53,7 @@ jobs:
   quality:
     name: Lint and type-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -82,6 +84,7 @@ jobs:
     # web editor never met any of them.
     name: Hooks (pre-commit)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -131,8 +134,9 @@ jobs:
           "$RUNNER_TEMP/gitleaks" dir . --redact --no-banner
 
   coverage:
-    name: Coverage (every file >= 90%)
+    name: Coverage (every file >= 95%)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -164,4 +168,4 @@ jobs:
       - name: Gate
         # A project total hides a hole, so the floor is per file. This is the
         # same script `make coverage` runs, so local and CI cannot drift.
-        run: python tests/check_coverage.py --min 90
+        run: python tests/check_coverage.py --min 95
