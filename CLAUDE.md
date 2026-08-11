@@ -187,9 +187,33 @@ must not be pushed. Dropping the parentheses around a URL leaves the URL in the
 string, so a substring check still passed while the user was shown
 `origin/maingit@github.com:x/y.git`. It now scores **43/43**.
 
-Both audits found the same thing: what goes unchecked is not the logic, it is
-the sentence the logic produces. Asserting that a message exists leaves every
-word of it free.
+`summary.py` and `shared.py` have had it as well. `shared` scored **2/5** and is
+now **5/5** — and the three survivors were the audit's own fault rather than the
+suite's: `shared.py` is imported by every other script, so with only
+`tests/test_shared.py` selected, breaking `refuse_option_like` so that it
+rejected *every* value survived. Its subject runs the whole suite now. Five
+mutations is still under a minute.
+
+`summary.py` scored **114/198**, and its survivors were the same shape as the
+first two audits at four times the scale: string literals and **dict keys**.
+`facts.get("commit")` mutated to `facts.get("")` makes a whole section vanish,
+and every test went on passing because each looked for one row rather than at
+the document. So the tests look at the document now — six golden comparisons
+against fixtures chosen to reach different branches. **189/198.**
+
+The nine that remain are recorded rather than chased, because each needs a
+fixture built to defeat it rather than to describe a run:
+
+| Line | Why it survives |
+| --- | --- |
+| `write.get("mode", "new")` | the default is only ever compared against `"overwrite"`, so emptying it changes nothing — equivalent |
+| `scan.get("gitignore", "none")`, `("prev_templates_count", "?")` | reached only when the key is absent *and* the surrounding state is present |
+| `merge.get("esc_bytes", 0)`, `commit.get("choice", …)` | the fixtures supply the value the default already produces |
+| `len(parts) > 1`, `strict=True`, `and` in the NET guard | need a fixture built around the boundary rather than around a run |
+
+Four audits, one finding: what goes unchecked is not the logic, it is the
+sentence the logic produces. Asserting that a message exists leaves every word
+of it free.
 
 Measuring coverage needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
 the suite drives the scripts as subprocesses, which a plain coverage run cannot
