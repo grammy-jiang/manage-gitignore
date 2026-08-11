@@ -120,7 +120,22 @@ def install(dest_root: Path, *, force: bool) -> Path:
         shutil.rmtree(dest)
 
     dest_root.mkdir(parents=True, exist_ok=True)
-    dest.symlink_to(source, target_is_directory=True)
+    try:
+        dest.symlink_to(source, target_is_directory=True)
+    except OSError as exc:
+        # ERROR_PRIVILEGE_NOT_HELD. Windows refuses symlinks to an unprivileged
+        # process unless Developer Mode is on, and says so in a number. The link
+        # is not optional here -- a copy would stop tracking the package on the
+        # next upgrade -- so this reports what to turn on rather than falling
+        # back to something that looks like success.
+        if getattr(exc, "winerror", None) == 1314:
+            raise OSError(
+                f"{dest}: Windows will not let this process create a symlink. Turn on "
+                "Developer Mode (Settings > System > For developers), or run this once from "
+                "an elevated prompt. A copy is not offered: the link is what makes upgrading "
+                "the package upgrade the skill."
+            ) from exc
+        raise
     return dest
 
 

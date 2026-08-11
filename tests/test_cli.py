@@ -372,6 +372,30 @@ class TestInstall:
         assert dest.is_symlink()
         assert not (dest / "stale.py").exists()
 
+    def test_a_windows_privilege_refusal_says_what_to_turn_on(self, skills, monkeypatch):
+        """`[WinError 1314] A required privilege is not held by the client` is
+        not an answer. Windows refuses symlinks to an unprivileged process
+        unless Developer Mode is on, and the whole install rests on the link --
+        a copy would stop tracking the package on the next upgrade -- so the
+        error has to name the setting rather than fall back to something that
+        looks like success.
+
+        Simulated rather than skipped off Windows: the message is the thing
+        under test, and it should not be a surprise the first time somebody on
+        Windows sees it.
+        """
+        refusal = OSError("A required privilege is not held by the client")
+        refusal.winerror = 1314  # type: ignore[attr-defined]  # only exists on Windows
+        monkeypatch.setattr(Path, "symlink_to", lambda *a, **k: (_ for _ in ()).throw(refusal))
+        with pytest.raises(OSError, match="Developer Mode"):
+            cli.install(skills, force=False)
+
+    def test_any_other_oserror_is_not_dressed_up_as_a_windows_problem(self, skills, monkeypatch):
+        boom = OSError("disk is on fire")
+        monkeypatch.setattr(Path, "symlink_to", lambda *a, **k: (_ for _ in ()).throw(boom))
+        with pytest.raises(OSError, match="disk is on fire"):
+            cli.install(skills, force=False)
+
     def test_refuses_a_link_to_something_else_without_force(self, skills, tmp_path):
         other = tmp_path / "elsewhere"
         other.mkdir()
