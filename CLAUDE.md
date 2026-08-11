@@ -5,8 +5,13 @@ package. `README.md` is written for people installing it. This file is for
 whoever is editing it.
 
 Run `make verify` before you push, and `make coverage` if you touched a script.
-CI runs the tests on 3.10 through 3.14, lints and type-checks on 3.10, and gates
-every file at 90% coverage. A tag will not build if any of that fails.
+CI runs the tests on 3.10 through 3.14, lints and type-checks on 3.10, gates
+every file at 90% coverage, and runs every pre-commit hook. A tag will not build
+if any of that fails.
+
+`pre-commit install` once, so the hooks run where they are cheap to fix.
+`make verify` does not cover them: gitleaks, markdownlint and yamllint live only
+in `.pre-commit-config.yaml`.
 
 ## Layout
 
