@@ -11,9 +11,12 @@ import ast
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
+
+import shared
 
 try:  # tomllib landed in 3.11; on 3.10 this one check simply does not run
     import tomllib
@@ -166,6 +169,40 @@ class TestShippedTextIsPlain:
             pytest.skip("no checkout")
         guilty = [p.name for p in tracked if p.is_file() and b"\x1b" in p.read_bytes()]
         assert guilty == []
+
+    def test_no_tracked_file_carries_an_invisible_character(self):
+        """The rule the skill applies to a `.gitignore`, applied to this repo.
+
+        Defect this pins: `tests/test_render_summary.py` built its bidi fixture
+        from a literal U+202E and U+200B instead of `\\u202e` and `\\u200b`
+        escapes. The escape form produces the same string at runtime, so the
+        literals bought nothing and cost everything: the test above cannot see
+        them -- it looks for one byte -- and neither can a reviewer, because
+        they render as nothing at all.
+
+        The pattern is `shared.SUSPICIOUS_CHARS` rather than a second list of
+        codepoints. That is the exact set the skill refuses to write into
+        somebody's `.gitignore`, and a repository that ships that rule should
+        not be exempt from it. Reusing it also means the two cannot drift.
+
+        Tab, newline and carriage return are not in the set, which is what lets
+        `.gitignore` keep the two real CR bytes in gitignore.io's `Icon\\r\\r`.
+        """
+        tracked = self._tracked()
+        if not tracked:
+            pytest.skip("no checkout")
+        guilty = []
+        for path in tracked:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:  # a binary file is not source text
+                continue
+            for char in sorted(set(shared.SUSPICIOUS_CHARS.findall(text))):
+                name = unicodedata.name(char, "unnamed")
+                guilty.append(f"{path.name}: U+{ord(char):04X} {name} x{text.count(char)}")
+        assert sorted(guilty) == []
 
     def test_the_licence_is_the_licence_it_claims_to_be(self):
         """`license = "MIT"` in pyproject.toml is metadata; this is the file it

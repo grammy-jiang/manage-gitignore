@@ -332,9 +332,16 @@ class TestSanitization:
         assert detected[0].lstrip().startswith("detected")
 
     def test_bidi_and_zero_width_characters_are_stripped(self):
-        out = render({"scan": {"git_repo": True, "detected": ["ev‮il​"]}})
-        assert "‮" not in out
-        assert "​" not in out
+        # Named codepoints, not literals: these characters render as nothing, so
+        # writing them into the source would hide the fixture from review and
+        # from grep, and the string is identical either way. `chr()` rather than
+        # a `\u` escape because it survives every editor and every diff as plain
+        # ASCII. `test_no_tracked_file_carries_an_invisible_character` in
+        # tests/test_cli.py holds the whole repository to this.
+        rlo, zwsp = chr(0x202E), chr(0x200B)  # bidi override, zero-width space
+        out = render({"scan": {"git_repo": True, "detected": [f"ev{rlo}il{zwsp}"]}})
+        assert rlo not in out
+        assert zwsp not in out
 
     def test_ordinary_unicode_survives(self):
         assert "日本語" in render({"notes": ["日本語のメモ"]})
