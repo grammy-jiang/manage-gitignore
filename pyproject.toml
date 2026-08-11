@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "manage-gitignore"
-version = "0.2.1"
-description = "Build a repository's .gitignore from gitignore.io, keeping its own custom rules — with a Claude Code skill that drives it"
+version = "0.3.0"
+description = "Build a repository's .gitignore from gitignore.io, keeping its own custom rules — with an agent skill that drives it"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Grammy Jiang", email = "grammy.jiang@gmail.com" }]
-keywords = ["gitignore", "git", "claude", "claude-code", "agent-skill"]
+keywords = ["gitignore", "git", "agent-skill", "claude-code", "codex", "github-copilot"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
