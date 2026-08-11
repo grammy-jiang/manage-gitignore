@@ -93,6 +93,34 @@ SUBJECTS = {
         ),
         tests=("tests/test_gitwork.py", "tests/test_gitwork_properties.py"),
     ),
+    "summary": Subject(
+        path=SCRIPTS / "summary.py",
+        # The renderer is pure throughout apart from `main`: it turns a facts
+        # document into text. Everything it produces is read by a person, which
+        # is what the first two audits found matters most.
+        pure=(
+            "names",
+            "color_diffstat",
+            "value_column",
+            "emit_section",
+            "render",
+        ),
+        tests=("tests/test_render_summary.py", "tests/test_summary_properties.py"),
+    ),
+    "shared": Subject(
+        path=SCRIPTS / "shared.py",
+        # `clean` is the whole defence behind the README's claim that no
+        # repo- or API-derived text can forge a line in the summary, and
+        # `has_suspicious_chars` is what reports the bytes it must not strip.
+        pure=("clean", "has_suspicious_chars", "refuse_option_like"),
+        # Everything, unusually. shared.py is imported by all three other
+        # scripts, so its coverage is spread across the whole suite: with only
+        # test_shared.py selected, breaking `refuse_option_like` so that it
+        # rejects *every* value survived, because the tests that would notice
+        # live in test_gitignore.py and test_gitwork.py. Five mutations against
+        # the full suite is still under a minute.
+        tests=("tests/",),
+    ),
 }
 
 # Deliberately a small, explainable set. Each entry turns one node into another

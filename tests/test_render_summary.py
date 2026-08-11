@@ -525,3 +525,234 @@ class TestCli:
         path = tmp_path / "f.json"
         path.write_text(json.dumps(FULL_FACTS), encoding="utf-8")
         assert "\x1b" not in run_cli(str(path)).stdout
+
+
+class TestGapsFoundByMutationAudit:
+    """Found by `python3 tests/mutate.py --subject summary`, which killed only
+    114 of 198 mutations.
+
+    Almost every survivor was a string literal or a dict key. Emptying a key --
+    `facts.get("commit")` becoming `facts.get("")` -- makes a whole section
+    vanish from the summary, and every test here went on passing, because each
+    looked for one row rather than at the document.
+
+    So this looks at the document. A golden comparison is brittle on purpose:
+    the summary is the product, its wording and column layout are what the user
+    reads, and `references/example-output.md` already promises to be regenerated
+    whenever the renderer's wording changes. Something has to fail when it does.
+    """
+
+    EXPECTED = """\
+manage-gitignore - run summary
+==============================
+
+NOTES
+  • history was reset before this run
+
+SCAN
+  repo        git repository
+  .gitignore  existing — 11 templates, 2 custom
+  detected    node (package.json)
+
+TEMPLATES — 12 total
+  always-on     git, vim
+  recommended   node  ← package.json
+  carried-over  python
+  added         dotenv
+  removed       (none)
+
+MERGE
+  template block  verbatim — byte-identical to API, no ANSI control bytes (0 ESC)
+  custom rules    1 kept, 1 removed
+    removed       node_modules/  (covered by Node)
+
+WRITE
+  .gitignore  overwritten — replaced existing file, custom rules kept (file existed)
+
+COMMIT
+  choice  commit + push
+  commit  6e0a827  chore: add dotenv
+  scope   .gitignore only  (4 other files untouched)
+  push    6e0a827 → origin/main
+
+NET
+  templates  11 → 12  +dotenv
+  diff       +7 / -3
+"""
+
+    def test_the_whole_summary_is_what_it_has_always_been(self):
+        assert render(FULL_FACTS) == self.EXPECTED
+
+
+# A run that refused, on a machine that was not a repository: the branches
+# FULL_FACTS never reaches -- absent values, a template set that only shrank,
+# a file created rather than overwritten, and nothing committed.
+REFUSED_FACTS = {
+    "scan": {"git_repo": False, "gitignore": "absent", "detected": []},
+    "templates": {
+        "total": 1,
+        "always_on": ["git"],
+        "recommended": [],
+        "carried_over": [],
+        "added": [],
+        "removed": ["python", "dotenv"],
+    },
+    "merge": {"verbatim": False, "esc_bytes": 3, "custom_kept": 0, "custom_removed": []},
+    "review": {"negations": ["!keep.log"], "broad": ["*"]},
+    "write": {"path": ".gitignore", "state": "new", "reason": "created"},
+    "commit": {"choice": "not committed", "note": "user declined"},
+    "net": {"prev_count": 3, "new_count": 1, "diffstat": "+0 / -12"},
+}
+
+# The one case where an empty REVIEW section is not silence but a statement.
+NOTHING_FLAGGED_FACTS = {"review": {"negations": [], "broad": []}}
+
+
+class TestGoldenSummariesForTheOtherBranches:
+    """The audit's remaining survivors were all in paths one fixture cannot
+    reach. Three documents rather than three dozen row assertions."""
+
+    def test_a_refused_run_renders_as_it_always_has(self):
+        assert (
+            render(REFUSED_FACTS)
+            == """\
+manage-gitignore - run summary
+==============================
+
+SCAN
+  repo        not a git repo
+  .gitignore  none
+  detected    (none)
+
+TEMPLATES — 1 total
+  always-on     git
+  carried-over  (none)
+  added         (none)
+  removed       python, dotenv  (no longer ignored)
+
+MERGE
+  template block  merged with custom rules
+  custom rules    0 kept, 0 removed
+
+REVIEW — in the template block
+  un-ignores  !keep.log
+  very broad  *  (may ignore more than intended)
+
+WRITE
+  .gitignore  created (new file)
+
+COMMIT
+  choice  not committed
+
+NET
+  templates  3 → 1  -python -dotenv
+  diff       +0 / -12
+"""
+        )
+
+    def test_an_empty_review_says_what_was_checked(self):
+        assert (
+            render(NOTHING_FLAGGED_FACTS)
+            == """\
+manage-gitignore - run summary
+==============================
+
+REVIEW — in the template block
+  flagged  none (custom rules not scanned)
+"""
+        )
+
+    def test_an_empty_facts_file_still_renders_a_heading(self):
+        assert (
+            render({})
+            == """\
+manage-gitignore - run summary
+==============================
+"""
+        )
+
+
+# Every optional key omitted, so the defaults are what render, and a title of
+# its own -- the one thing no other fixture supplies.
+DEFAULTS_FACTS = {
+    "title": "a run with a title of its own",
+    "scan": {"git_repo": True, "gitignore": "something-unrecognised", "detected": ["x"]},
+    "templates": {"total": 2, "always_on": ["git"], "added": ["node"]},
+    "merge": {"verbatim": True, "custom_removed": [{"line": "*.log"}]},
+    "write": {"mode": "overwrite", "reason": "the file was already there"},
+    "commit": {},
+    "net": {"prev_count": 1, "new_count": 2},
+}
+
+# A .gitignore somewhere other than the repository root, which is the only way
+# the path in the WRITE row is not simply the default.
+ELSEWHERE_FACTS = {"write": {"mode": "new", "path": "packages/api/.gitignore"}}
+
+# Colour is output too: `names` marks added and removed templates differently,
+# and with a colourless palette both branches produce identical text.
+COLOURED_FACTS = {
+    "templates": {
+        "total": 3,
+        "always_on": ["git"],
+        "added": ["node", "vim"],
+        "removed": ["python"],
+        "carried_over": [],
+    }
+}
+
+
+class TestGoldenSummariesForTheDefaults:
+    """More of the audit's survivors. Each of these renders a value that the
+    other fixtures happen to supply explicitly, so the fallback behind it was
+    never exercised."""
+
+    def test_the_fallbacks_render_as_they_always_have(self):
+        assert (
+            render(DEFAULTS_FACTS)
+            == """\
+a run with a title of its own
+=============================
+
+SCAN
+  repo        git repository
+  .gitignore  none
+  detected    x
+
+TEMPLATES — 2 total
+  always-on     git
+  carried-over  (none)
+  added         node
+  removed       (none)
+
+MERGE
+  template block  verbatim — byte-identical to API, no ANSI control bytes (0 ESC)
+  custom rules    0 kept, 1 removed
+    removed       *.log  (covered by template)
+
+WRITE
+  .gitignore  overwritten — replaced existing file, custom rules kept (the file was already there)
+
+NET
+  templates  1 → 2  +node
+"""
+        )
+
+    def test_a_gitignore_outside_the_root_is_named_in_full(self):
+        assert (
+            render(ELSEWHERE_FACTS)
+            == """\
+manage-gitignore - run summary
+==============================
+
+WRITE
+  packages/api/.gitignore  created (new file)
+"""
+        )
+
+    def test_added_and_removed_templates_are_coloured_differently(self):
+        """With `Pal(False)` the two branches are the same string, so nothing
+        else in this file can tell them apart."""
+        assert (
+            rs.render(COLOURED_FACTS, rs.Pal(True))
+            == "\x1b[1;36mmanage-gitignore - run summary\x1b[0m\n\x1b[36m==============================\x1b[0m\n\n\x1b[1;37mTEMPLATES — 3 total\x1b[0m\n  \x1b[36malways-on   \x1b[0m  git\n  \x1b[36mcarried-over\x1b[0m  \x1b[2m(none)\x1b[0m\n  \x1b[36madded       \x1b[0m  \x1b[32mnode\x1b[0m, \x1b[32mvim\x1b[0m\n  \x1b[36mremoved     \x1b[0m  \x1b[31mpython\x1b[0m\x1b[2m  (no longer ignored)\x1b[0m\n"
+        )
