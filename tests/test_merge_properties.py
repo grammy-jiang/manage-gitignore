@@ -161,8 +161,10 @@ class TestSplitRegionsRecoversWhatWasAssembled:
         got_names, block, got_custom = templates.split_regions(text)
 
         assert got_names == names
-        assert block[0].startswith(templates.CREATED)
-        assert block[-1].startswith(templates.ENDOF)
+        # The whole block, line for line -- not just its two markers. A block
+        # truncated in the middle would still start and end correctly, and
+        # "written verbatim" is the claim being checked.
+        assert block == api.rstrip("\n").splitlines()
         # Blank lines are structural -- assembling inserts one -- so the claim is
         # about the rules and comments, in order, not about the whitespace.
         assert [x for x in got_custom if x.strip()] == [x for x in custom if x.strip()]
@@ -257,12 +259,35 @@ class TestReapplyCustomCarriesTheEdit:
 
     @PROPERTY
     @given(kept=custom_lines, base=custom_lines, theirs=custom_lines)
-    def test_a_deletion_never_increases_how_often_a_line_appears(self, kept, base, theirs):
-        """Stated as a count, not as absence: `kept` may legitimately hold a
-        line twice, and honouring one deletion removes one copy."""
-        result, _, removed = templates.reapply_custom(kept, base, theirs)
-        for line in set(removed):
-            assert result.count(line) <= kept.count(line) + theirs.count(line)
+    def test_a_deleted_line_is_actually_gone(self, kept, base, theirs):
+        """A deletion the user made is applied exactly once per occurrence.
+
+        Stated as a count rather than as absence, because `kept` may legitimately
+        hold a line twice and honouring one deletion removes one copy. Lines the
+        user re-added are excluded: those are covered by the addition property,
+        and counting them here would only restate it.
+
+        Defect this pins: the first version of this test asserted
+        `result.count(line) <= kept.count(line) + theirs.count(line)`, which an
+        implementation that never applied deletions at all also satisfies --
+        with kept=["a"], base=["a"], theirs=[], a wrong result of ["a"] gives
+        1 <= 1. Two reviewers caught it independently. A property every
+        implementation passes is worse than no property: it reads like a
+        guarantee and is not one.
+        """
+        result, added, removed = templates.reapply_custom(kept, base, theirs)
+        for line in set(removed) - set(added):
+            assert result.count(line) == max(0, kept.count(line) - removed.count(line))
+
+    def test_the_smallest_case_a_broken_deletion_would_survive(self):
+        """The counterexample from that review, pinned on its own.
+
+        Not generated: this exact triple is the one that separates a working
+        implementation from one that drops the deletion step, so it is worth
+        naming rather than trusting the search to rediscover.
+        """
+        result, added, removed = templates.reapply_custom(["a"], ["a"], [])
+        assert (result, added, removed) == ([], [], ["a"])
 
 
 class TestTheWholeRebuild:
@@ -282,11 +307,13 @@ class TestTheWholeRebuild:
         kept, removed = templates.dedup_custom(old_custom, new_api)
 
         rebuilt = new_api.rstrip("\n") + "\n\n" + "\n".join(kept) + "\n" if kept else new_api
-        rebuilt_names, _, rebuilt_custom = templates.split_regions(rebuilt)
+        rebuilt_names, rebuilt_block, rebuilt_custom = templates.split_regions(rebuilt)
 
         assert rebuilt_names == new_names
-        # The block is verbatim: every line of the fetched response survives.
+        # Verbatim, twice over: the fetched bytes appear in the file, and what
+        # reading the file back calls "the block" is exactly those bytes.
         assert new_api.rstrip("\n") in rebuilt
+        assert rebuilt_block == new_api.rstrip("\n").splitlines()
 
         covered = set(templates.api_pattern_sections(new_api))
         should_survive = {p for p in patterns_of(custom) if p not in covered}
