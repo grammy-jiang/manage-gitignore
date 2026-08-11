@@ -1616,3 +1616,270 @@ class TestScopeViolationSaysWhatWentWrong:
 
     def test_a_commit_touching_only_the_target_is_not_a_violation(self, repo):
         assert gw.scope_violation(str(repo), [".gitignore"]) is None
+
+
+class TestGapsFoundByTheAllFunctionsAudit:
+    """Pinned by the first mutation audit to cover the half of this file that
+    runs git (`mutate.py --subject gitwork --all-functions`).
+
+    The earlier audits mutated only the pure functions, so everything below was
+    executed by the suite and checked by none of it. Each docstring names the
+    mutation that survived.
+
+    Two shapes account for most of them, and both are the same lesson the
+    `summary.py` audit produced: a test that reads one key out of a JSON
+    document leaves every other key free, and a test that asserts a message
+    exists leaves every word of it free.
+    """
+
+    def test_the_hardening_git_runs_under_is_exactly_this(self, repo, monkeypatch):
+        """Survived: `'GIT_TERMINAL_PROMPT' -> ''` and `'0' -> ''`.
+
+        Two of this repository's stated safety properties live in these four
+        strings -- `ext::` remotes are code execution from repo-local config,
+        and a credential prompt hangs a headless run forever. Nothing looked at
+        either, so deleting the env var name left the suite green.
+        """
+        seen: dict[str, object] = {}
+
+        def fake(argv, **kwargs):
+            import subprocess as sp
+
+            seen["argv"] = argv
+            seen["env"] = kwargs["env"]
+            return sp.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gw.subprocess, "run", fake)
+        gw.git(str(repo), "status")
+
+        assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        argv = seen["argv"]
+        assert argv[:3] == ["git", "-C", str(repo)]
+        # Order matters as much as presence: a `-c` must be followed by its
+        # setting, and both must arrive before the subcommand.
+        assert argv[3:7] == [
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "protocol.file.allow=user",
+        ]
+        assert argv[7:] == ["status"]
+
+    def test_stderr_is_truncated_only_past_the_limit(self, repo, monkeypatch, capsys):
+        """Survived: `400 -> 401` and `Gt -> GtE`.
+
+        The existing test asserted `len(err) < MAX_ERR_LEN + 200`, which is true
+        of a limit anywhere in a 200-character window. The boundary is the whole
+        claim, so it is tested at the boundary.
+        """
+        import subprocess as sp
+
+        def stderr_of(length):
+            def fake(*args, **kwargs):
+                return sp.CompletedProcess(args=[], returncode=1, stdout="", stderr="x" * length)
+
+            return fake
+
+        # Stated independently, and not because the number matters in itself.
+        # Everything below measures against `gw.MAX_ERR_LEN`, so it all moves
+        # with the constant -- which is how `400 -> 401` survived the first
+        # version of this test. One assertion has to name the value.
+        assert gw.MAX_ERR_LEN == 400
+
+        monkeypatch.setattr(gw.subprocess, "run", stderr_of(gw.MAX_ERR_LEN))
+        _, _, exact = gw.git(str(repo), "status")
+        assert exact == "x" * gw.MAX_ERR_LEN, "a stderr of exactly the limit is not truncated"
+
+        monkeypatch.setattr(gw.subprocess, "run", stderr_of(gw.MAX_ERR_LEN + 1))
+        _, _, over = gw.git(str(repo), "status")
+        assert over == "x" * gw.MAX_ERR_LEN + " …(truncated)"
+
+    def test_git_output_that_is_not_utf8_is_replaced_rather_than_fatal(self, repo):
+        """Survived: `'replace' -> ''`.
+
+        The comment on that argument says a non-UTF-8 locale must not crash a
+        git read, and nothing tested it. An empty `errors=` is not a milder
+        setting -- it is a LookupError on the first byte git returns.
+        """
+        (repo / ".gitignore").write_bytes(b"# caf\xe9 (latin-1, not utf-8)\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-m", "latin-1")
+
+        rc, out, _ = gw.git(str(repo), "show", "HEAD:.gitignore")
+
+        assert rc == 0
+        assert "caf" in out and "�" in out
+
+    def test_stdout_is_stripped_unless_the_caller_says_otherwise(self, repo, monkeypatch):
+        """Survived: `strip: bool = True -> False`.
+
+        The default is the interesting half: `--porcelain` passes `strip=False`
+        explicitly and is well covered, so flipping what everything *else* gets
+        changed no test.
+        """
+        import subprocess as sp
+
+        def fake(*args, **kwargs):
+            return sp.CompletedProcess(args=[], returncode=0, stdout="  padded  \n", stderr="")
+
+        monkeypatch.setattr(gw.subprocess, "run", fake)
+
+        assert gw.git(str(repo), "log")[1] == "padded"
+        assert gw.git(str(repo), "log", strip=False)[1] == "  padded  "
+
+    def test_a_clean_commit_emits_exactly_this_document(self, repo, run_script, tmp_path):
+        """Survived: `'hash'`, `'subject'`, `'files'`, `'untouched_count'`,
+        `'only_gitignore'` and its `True -> False`, each emptied or flipped.
+
+        Every one of them was executed by `TestCommit`, which reads one key per
+        test. Emptying a key does not fail `data["files"] == [".gitignore"]` --
+        it makes some *other* key vanish, and no test was looking at the shape
+        of the document. So this one looks at the document.
+        """
+        write_gitignore(repo)
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+        assert out.returncode == 0, out.stderr
+
+        data = json.loads(out.stdout)
+        sha = data.get("hash")
+        assert isinstance(sha, str) and len(sha) >= 7
+        assert data == {
+            "hash": sha,
+            "subject": "chore: update .gitignore",
+            "files": [".gitignore"],
+            "only_gitignore": True,
+            "content_matches": True,
+            "verdict": "ok",
+            "untouched_count": 0,
+            "untouched": None,
+        }
+
+    def test_a_commit_that_touched_extra_files_emits_exactly_this_document(
+        self, repo, run_script, tmp_path
+    ):
+        """Survived: `'record_note' -> ''`, `'only_gitignore' -> ''` and the
+        `False -> True` beside it.
+
+        This is the refusal path -- the document that tells the agent not to
+        push and not to record the commit. `record_choice` and `record_note`
+        exist so the agent never composes that sentence itself, so an emptied
+        key here is a run that pushes something it should not have.
+        """
+        write_gitignore(repo)
+        (repo / "other.txt").write_text("not ours\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\ngit add other.txt\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "commit", "--message-file", str(msg_file(tmp_path))
+        )
+
+        assert out.returncode == gw.EXIT_BAD_COMMIT, out.stdout
+        data = json.loads(out.stdout)
+        assert data["only_gitignore"] is False
+        assert data["verdict"] == "touched-extra-files"
+        assert data["record_choice"] == "not committed"
+        assert data["record_note"] == (
+            f"commit {data['hash']} was made but touched extra files; not recorded "
+            "— see the reported undo command"
+        )
+        assert sorted(data["files"]) == [".gitignore", "other.txt"]
+
+    def test_a_rejected_push_is_never_reported_as_pushed(self, remote_pair, run_script):
+        """Survived: `check=True -> False` on all three `git push` calls.
+
+        The worst survivor in the file. With `check=False` a push the remote
+        rejects returns normally, `record_push` stores it, and the document says
+        `"pushed": true` -- so the agent tells the user their work is on the
+        remote when it is not, and the facts file agrees with it.
+
+        Nothing tested a failing push at all; every push test used a remote that
+        accepts. A `pre-receive` hook is the honest way to refuse, because it
+        fails the way a protected branch does.
+        """
+        work, bare = remote_pair
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-m", "something to push")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push")
+
+        assert out.returncode != 0, out.stdout
+        if out.stdout.strip():
+            assert json.loads(out.stdout).get("pushed") is not True
+        assert remote_head(bare) != git(work, "rev-parse", "HEAD").stdout.strip()
+
+    @pytest.mark.parametrize(
+        ("leg", "expected_error"),
+        [("ambiguous", "ambiguous-remote"), ("unknown", "unknown-remote")],
+    )
+    def test_a_remote_refusal_reports_it_did_not_push(
+        self, repo, run_script, make_bare, leg, expected_error
+    ):
+        """Survived: `"pushed": False -> True` on both refusal legs.
+
+        `TestPush` checks the exit code for each of these and stops there, so
+        the JSON was free to claim the opposite of what the exit code said. The
+        contract exists precisely so a caller never has to read stderr.
+        """
+        # No remote named `origin`: with one present the plan would simply pick
+        # it, and neither refusal leg would be reached.
+        if leg == "ambiguous":
+            for name in ("alpha", "beta"):
+                git(repo, "remote", "add", name, str(make_bare(name)))
+            extra = []
+        else:
+            git(repo, "remote", "add", "only", str(make_bare("only")))
+            extra = ["--remote", "nowhere"]
+
+        out = run_script("gitwork.py", "--dir", str(repo), "push", *extra)
+
+        assert out.returncode == 5
+        data = json.loads(out.stdout)
+        assert data["pushed"] is False
+        assert data["error"] == expected_error
+
+    def test_a_force_refused_for_a_missing_lease_reports_it_did_not_push(
+        self, remote_pair, clone_of, run_script, tmp_path
+    ):
+        """Survived: `"pushed": False -> True` and `'missing-expect-remote' -> ''`.
+
+        The refusal that protects a force-push from being leased against a ref
+        this command's own fetch just moved. Its exit code was checked; the
+        document saying no push happened was not.
+        """
+        work, bare = remote_pair
+        other = clone_of(bare, tmp_path / "other")
+        (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-m", "theirs")
+        git(other, "push", "-q", "origin", "main")
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-m", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--confirm-force")
+
+        assert out.returncode == 6
+        data = json.loads(out.stdout)
+        assert data["pushed"] is False
+        assert data["error"] == "missing-expect-remote"
+
+    def test_the_error_exit_code_is_the_one_the_table_names(self, repo, run_script):
+        """Survived: `EXIT_ERROR = 1 -> 2`.
+
+        It survived because nothing used it: `die` called `sys.exit(1)` with the
+        literal, so the constant was a second, unreferenced statement of the
+        same fact -- exactly what the exit-code table exists to prevent. `die`
+        uses the constant now, which is what makes this test able to fail.
+        """
+        out = run_script("gitwork.py", "--dir", str(repo), "commit", "--message-file", "/no/such")
+        assert out.returncode == gw.EXIT_ERROR
+        assert gw.EXIT_ERROR == 1

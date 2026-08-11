@@ -57,6 +57,49 @@ class TestCheckApiBlock:
     def test_tolerates_blank_lines_after_the_end_marker(self):
         gi.check_api_block(api_block(["git"], trailing="\n   \n"), ["git"])
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("<html>hello</html>\n", "unexpected response (not gitignore API output)"),
+            (
+                "# Created by https://evil.example/api/git\n",
+                "response header names an unexpected URL: https://evil.example/api/git",
+            ),
+            (
+                api_block(["node"], header_names=["node", "python"]),
+                "response is for different templates than requested "
+                "(requested: node; got: node,python)",
+            ),
+            (
+                api_block(["git"], omit_end=True),
+                "response block is truncated (no '# End of' marker)",
+            ),
+            (
+                api_block(["git"], trailing="*\n!keep-me"),
+                "response has unexpected trailing data after '# End of': '*'",
+            ),
+            # Long enough to reach the slice. With a one-character line -- which
+            # is what the first version of this test used -- `[:80]` and `[:81]`
+            # produce identical output, so the bound went unchecked.
+            (
+                api_block(["git"], trailing="z" * 100),
+                "response has unexpected trailing data after '# End of': " + repr("z" * 80),
+            ),
+        ],
+    )
+    def test_each_refusal_says_which_check_failed(self, text, expected, capsys):
+        """Survived the --all-functions audit: every one of these messages,
+        emptied, and the tests above went on passing.
+
+        They assert that *a* SystemExit happened, which five different refusals
+        satisfy equally. The message is the entire difference between "the API
+        changed shape" and "something is impersonating the API", and it is the
+        only thing a user gets, so it is asserted rather than assumed.
+        """
+        with pytest.raises(SystemExit):
+            gi.check_api_block(text, ["git"] if "node" not in text else ["node"])
+        assert capsys.readouterr().err.strip().endswith(expected)
+
 
 # ── parsing an existing file ────────────────────────────────────────────────
 class TestSplitExisting:
@@ -751,6 +794,35 @@ class TestFetchBounds:
         # Adjacency matters: the value must belong to the flag it bounds.
         assert argv[argv.index("--max-time") + 1] == str(gi.FETCH_MAX_SECONDS)
         assert argv[argv.index("--max-filesize") + 1] == str(gi.FETCH_MAX_BYTES)
+
+    def test_the_curl_command_line_is_exactly_this(self, api):
+        """Survived the --all-functions audit: `'-fsS' -> ''`.
+
+        The test above checks `--proto`, the absence of `-L`, and that the two
+        bounds reach the flags they belong to -- but nothing named `-fsS`, so
+        deleting it changed no test. `-f` is the load-bearing letter: without
+        it curl prints the server's error page as the response body and exits
+        0, so a 404 or a captive portal becomes the text this tool goes on to
+        treat as a template block.
+
+        Asserted as the whole command rather than flag by flag, which is what
+        the audit says actually holds: every element checked individually still
+        leaves the ones nobody thought to name.
+        """
+        gi.fetch_bytes("node")
+        argv = api.invocations()[-1]
+        # argv[0] is the stub's absolute path, since it is what PATH resolved.
+        assert os.path.basename(argv[0]) == "curl"
+        assert argv[1:] == [
+            "-fsS",
+            "--proto",
+            "=https",
+            "--max-time",
+            str(gi.FETCH_MAX_SECONDS),
+            "--max-filesize",
+            str(gi.FETCH_MAX_BYTES),
+            f"{gi.API}/node",
+        ]
 
     def test_a_response_exactly_at_the_cap_is_accepted(self, api, monkeypatch):
         """The cap is a ceiling, not an off-by-one rejection."""
