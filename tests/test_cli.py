@@ -59,7 +59,10 @@ class TestSkillSource:
         stand_in.parent.mkdir(parents=True)
         stand_in.touch()
         monkeypatch.setattr(cli, "__file__", str(stand_in))
-        with pytest.raises(FileNotFoundError, match=str(tmp_path / "pkg" / "skill")):
+        # re.escape: `match` is a regular expression, and a Windows path is full
+        # of backslashes -- `C:\Users\...` reads as an incomplete `\U` escape and
+        # fails before the assertion is even attempted.
+        with pytest.raises(FileNotFoundError, match=re.escape(str(tmp_path / "pkg" / "skill"))):
             cli.skill_source()
 
     def test_nothing_remaps_the_skill_at_build_time(self):
@@ -298,7 +301,13 @@ class TestLinkInspection:
 
     def test_a_relative_link_to_the_packaged_skill_is_ours(self, skills):
         """Resolved against the link's own directory, not the process cwd."""
-        rel = os.path.relpath(cli.skill_source(), skills)
+        try:
+            rel = os.path.relpath(cli.skill_source(), skills)
+        except ValueError:  # pragma: no cover - only on Windows, across drives
+            # There is no relative path from C: to D:, so there is no link of
+            # this shape to inspect. Nothing about `is_our_link` is untested as
+            # a result: the absolute case runs everywhere.
+            pytest.skip("checkout and temporary directory are on different drives")
         (skills / cli.SKILL_NAME).symlink_to(rel, target_is_directory=True)
         assert cli.is_our_link(skills / cli.SKILL_NAME) is True
 
@@ -371,6 +380,30 @@ class TestInstall:
         dest = cli.install(skills, force=True)
         assert dest.is_symlink()
         assert not (dest / "stale.py").exists()
+
+    def test_a_windows_privilege_refusal_says_what_to_turn_on(self, skills, monkeypatch):
+        """`[WinError 1314] A required privilege is not held by the client` is
+        not an answer. Windows refuses symlinks to an unprivileged process
+        unless Developer Mode is on, and the whole install rests on the link --
+        a copy would stop tracking the package on the next upgrade -- so the
+        error has to name the setting rather than fall back to something that
+        looks like success.
+
+        Simulated rather than skipped off Windows: the message is the thing
+        under test, and it should not be a surprise the first time somebody on
+        Windows sees it.
+        """
+        refusal = OSError("A required privilege is not held by the client")
+        refusal.winerror = 1314  # type: ignore[attr-defined]  # only exists on Windows
+        monkeypatch.setattr(Path, "symlink_to", lambda *a, **k: (_ for _ in ()).throw(refusal))
+        with pytest.raises(OSError, match="Developer Mode"):
+            cli.install(skills, force=False)
+
+    def test_any_other_oserror_is_not_dressed_up_as_a_windows_problem(self, skills, monkeypatch):
+        boom = OSError("disk is on fire")
+        monkeypatch.setattr(Path, "symlink_to", lambda *a, **k: (_ for _ in ()).throw(boom))
+        with pytest.raises(OSError, match="disk is on fire"):
+            cli.install(skills, force=False)
 
     def test_refuses_a_link_to_something_else_without_force(self, skills, tmp_path):
         other = tmp_path / "elsewhere"
@@ -450,8 +483,14 @@ class TestDetectedInstall:
         home.mkdir()
         bindir = tmp_path / "bin"
         bindir.mkdir()
+        # Both, because `Path.home()` reads a different variable per platform:
+        # HOME on POSIX, USERPROFILE on Windows. Setting only HOME left the
+        # Windows runs detecting the real machine's agents and installing into
+        # the runner's actual home directory.
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         return home
 
     def test_links_where_the_detected_agent_looks(self, isolated, capsys):
@@ -556,8 +595,14 @@ class TestSweepingUninstall:
         home.mkdir()
         bindir = tmp_path / "bin"
         bindir.mkdir()
+        # Both, because `Path.home()` reads a different variable per platform:
+        # HOME on POSIX, USERPROFILE on Windows. Setting only HOME left the
+        # Windows runs detecting the real machine's agents and installing into
+        # the runner's actual home directory.
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         return home
 
     def test_removes_links_for_agents_no_longer_installed(self, isolated):
@@ -573,7 +618,7 @@ class TestSweepingUninstall:
     def test_it_leaves_a_stranger_alone_and_exits_non_zero(self, isolated, capsys):
         cli.main(["install", "--all"])
         stranger = isolated / ".agents" / "skills" / cli.SKILL_NAME
-        stranger.unlink()
+        cli.remove_link(stranger)  # a directory symlink; Windows needs rmdir
         stranger.mkdir()
         assert cli.main(["uninstall"]) == 1
         assert stranger.is_dir()
@@ -700,6 +745,11 @@ class TestDispatch:
         assert str(skills / cli.SKILL_NAME) in out
         assert str(cli.skill_source()) in out
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="chmod does not remove write access on Windows; the ACL equivalent is not "
+        "what this test is about",
+    )
     def test_an_unwritable_skills_directory_is_an_error_not_a_traceback(self, tmp_path, capsys):
         """OSError is caught alongside FileExistsError; a permission problem
         should read like a refusal, not a crash."""

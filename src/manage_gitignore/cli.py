@@ -79,6 +79,24 @@ def is_our_link(link: Path) -> bool:
     return resolved.name == "skill" and (resolved / "SKILL.md").is_file()
 
 
+def remove_link(link: Path) -> None:
+    """Delete a symlink, whatever it points at, on any platform.
+
+    POSIX has one call for this. Windows has two: a symlink to a directory is
+    itself a directory entry, and `unlink` refuses it -- `rmdir` is what removes
+    the link. Getting this wrong makes `uninstall` fail on the very platform
+    where `install` had to work hardest, and makes reinstalling over an existing
+    link fail too.
+
+    `os.path.isdir` follows the link on purpose: a dangling link is not a
+    directory to Windows either, and `unlink` is right for it.
+    """
+    if os.name == "nt" and os.path.isdir(link):  # pragma: no cover - Windows only
+        os.rmdir(link)  # removes the link, never its target
+    else:
+        link.unlink()
+
+
 def install_refusal(dest: Path, *, force: bool) -> str | None:
     """Why `install` would refuse to write `dest`, or None if it would proceed.
 
@@ -115,12 +133,28 @@ def install(dest_root: Path, *, force: bool) -> Path:
     if refusal is not None:
         raise FileExistsError(refusal)
     if dest.is_symlink():
-        dest.unlink()
+        remove_link(dest)
     elif dest.exists():
         shutil.rmtree(dest)
 
     dest_root.mkdir(parents=True, exist_ok=True)
-    dest.symlink_to(source, target_is_directory=True)
+    try:
+        dest.symlink_to(source, target_is_directory=True)
+    except OSError as exc:
+        # ERROR_PRIVILEGE_NOT_HELD. Windows refuses symlinks to an unprivileged
+        # process unless Developer Mode is on, and says so in a number. The link
+        # is not optional here -- a copy would stop tracking the package on the
+        # next upgrade -- so this reports what to turn on rather than falling
+        # back to something that looks like success.
+        if getattr(exc, "winerror", None) == 1314:
+            raise OSError(
+                f"{dest}: Windows will not let this process create a symlink. Turn on "
+                "Developer Mode in Settings, or run this once from an elevated prompt. "
+                "(The setting is called Developer Mode on both Windows 10 and 11; the two "
+                "keep it in different places, so search Settings for the name.) A copy is "
+                "not offered: the link is what makes upgrading the package upgrade the skill."
+            ) from exc
+        raise
     return dest
 
 
@@ -158,7 +192,7 @@ def uninstall(dest_root: Path, *, force: bool) -> Path | None:
         raise FileExistsError(refusal)
     if not dest.is_symlink():
         return None
-    dest.unlink()  # the link only; whatever it pointed at is untouched
+    remove_link(dest)  # the link only; whatever it pointed at is untouched
     return dest
 
 

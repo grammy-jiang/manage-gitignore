@@ -8,6 +8,7 @@ say something different on CI than on a developer's laptop.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -29,12 +30,21 @@ def empty_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir()
     monkeypatch.setenv("PATH", str(bindir))
+    # PATHEXT decides what counts as executable on Windows. Pinning it keeps
+    # `put_binary` and `shutil.which` agreeing about that on every runner.
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     return bindir
 
 
 def put_binary(bindir: Path, name: str) -> Path:
-    exe = bindir / name
-    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    """A file `shutil.which` will find, spelled the way the platform requires.
+
+    On Windows an extensionless file is not executable however its permissions
+    read; `which` consults PATHEXT. A launcher installed there really is
+    `claude.cmd` or `codex.exe`, so this is what the fixture must create.
+    """
+    exe = bindir / (f"{name}.cmd" if os.name == "nt" else name)
+    exe.write_text("@echo off\n" if os.name == "nt" else "#!/bin/sh\n", encoding="utf-8")
     exe.chmod(0o755)
     return exe
 
@@ -81,7 +91,10 @@ class TestDetection:
         exe = put_binary(empty_path, "copilot")
         on_path = agents.detect(agents.BY_KEY["copilot"], home=home)
         assert on_path.evidence is not None
-        assert str(exe) in on_path.evidence
+        # Case-insensitively: `shutil.which` reports the extension as PATHEXT
+        # spells it, which is upper case on Windows, while the file this fixture
+        # created is `copilot.cmd`. The same path, written two ways.
+        assert str(exe).lower() in on_path.evidence.lower()
 
         (home / ".codex").mkdir()
         by_config = agents.detect(agents.BY_KEY["codex"], home=home)
