@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
@@ -150,24 +151,53 @@ class TestShippedTextIsPlain:
     """
 
     @staticmethod
-    def _tracked() -> list[Path]:
-        import subprocess
+    def _tracked(repo: Path | None = None) -> list[tuple[str, bytes]]:
+        """Every tracked file as `(path, content)`, read from git, not the disk.
 
-        repo = Path(__file__).resolve().parents[1]
+        Walking the work tree gets this wrong in two directions, because
+        `Path.is_file()` follows a symlink: a tracked link is read as whatever
+        it points *at* -- a file git may not track, or may not even contain --
+        and a dangling one is skipped entirely. Git stores a symlink as a blob
+        holding its target string, so reading blobs checks the bytes that are
+        actually committed and cannot be swayed by what happens to exist on the
+        machine running the suite.
+
+        A gitlink (mode 160000, a submodule) has no blob here and is skipped.
+        """
+        repo = Path(__file__).resolve().parents[1] if repo is None else repo
         if not (repo / ".git").exists():  # installed package, not a checkout
             return []
         listing = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "-z"],
+            ["git", "-C", str(repo), "ls-files", "-s", "-z"],
             capture_output=True,
             check=True,
         ).stdout
-        return [repo / name.decode() for name in listing.split(b"\0") if name]
+
+        blobs: list[tuple[str, bytes]] = []
+        for record in listing.split(b"\0"):
+            if not record:
+                continue
+            meta, _, name = record.partition(b"\t")
+            mode, sha, _stage = meta.split(b" ")
+            if mode == b"160000":
+                continue
+            # One `cat-file` per blob rather than a `--batch` stream: the batch
+            # protocol needs offset arithmetic to split contents apart, and a
+            # parser that is subtly wrong inside a guard is worse than a guard
+            # that takes an extra second.
+            content = subprocess.run(
+                ["git", "-C", str(repo), "cat-file", "blob", sha.decode()],
+                capture_output=True,
+                check=True,
+            ).stdout
+            blobs.append((name.decode(), content))
+        return blobs
 
     def test_no_tracked_file_contains_an_escape_byte(self):
         tracked = self._tracked()
         if not tracked:
             pytest.skip("no checkout")
-        guilty = [p.name for p in tracked if p.is_file() and b"\x1b" in p.read_bytes()]
+        guilty = [name for name, content in tracked if b"\x1b" in content]
         assert guilty == []
 
     def test_no_tracked_file_carries_an_invisible_character(self):
@@ -192,17 +222,36 @@ class TestShippedTextIsPlain:
         if not tracked:
             pytest.skip("no checkout")
         guilty = []
-        for path in tracked:
-            if not path.is_file():
-                continue
+        for name, content in tracked:
             try:
-                text = path.read_text(encoding="utf-8")
+                text = content.decode("utf-8")
             except UnicodeDecodeError:  # a binary file is not source text
                 continue
             for char in sorted(set(shared.SUSPICIOUS_CHARS.findall(text))):
-                name = unicodedata.name(char, "unnamed")
-                guilty.append(f"{path.name}: U+{ord(char):04X} {name} x{text.count(char)}")
+                label = unicodedata.name(char, "unnamed")
+                guilty.append(f"{name}: U+{ord(char):04X} {label} x{text.count(char)}")
         assert sorted(guilty) == []
+
+    def test_a_tracked_symlink_is_checked_as_its_target_string(self, tmp_path):
+        """A link's blob is its destination, and that is what must be scanned.
+
+        Defect this pins: the scan walked the work tree, where `Path.is_file()`
+        follows a link. A tracked symlink was therefore read as the file it
+        points at -- which git may not track, or may not contain at all -- and a
+        dangling one was skipped outright. Either way a character hidden in the
+        destination string sailed through a guard whose whole job is to find it.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "ordinary.txt").write_text("nothing to see\n", encoding="utf-8")
+        # Deliberately dangling, which is the case the work-tree walk skipped.
+        (repo / "link").symlink_to(f"points{chr(0x202E)}elsewhere")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+        blobs = dict(self._tracked(repo))
+        assert set(blobs) == {"ordinary.txt", "link"}
+        assert blobs["link"].decode() == f"points{chr(0x202E)}elsewhere"
 
     def test_the_licence_is_the_licence_it_claims_to_be(self):
         """`license = "MIT"` in pyproject.toml is metadata; this is the file it
