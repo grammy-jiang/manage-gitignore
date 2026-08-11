@@ -11,9 +11,29 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
+      - id: check-toml # pyproject.toml is the one file every gate reads
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: mixed-line-ending
+      - id: detect-private-key
+      - id: check-shebang-scripts-are-executable
+  # A bare `# noqa` would switch off every rule on a line, including ones nobody
+  # was arguing with. This repository's ignores are narrow and carry a reason;
+  # this keeps it that way.
+  - repo: https://github.com/pre-commit/pygrep-hooks
+    rev: v1.10.0
+    hooks:
+      - id: python-check-blanket-noqa
+      - id: python-check-blanket-type-ignore
+  # Same two commands `make verify` and CI run, at the point where fixing them
+  # is cheapest. The rev tracks the `ruff>=0.5` dev dependency; when they drift,
+  # the hook and the gate disagree about what the code should look like.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:
