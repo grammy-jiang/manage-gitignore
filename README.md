@@ -4,38 +4,61 @@ Build a repository's `.gitignore` from [gitignore.io](https://www.toptal.com/dev
 writing the template block **verbatim** and preserving the repo's own custom rules —
 then review the diff and, with confirmation, commit and push it.
 
-This repository ships **one thing: a [Claude Code](https://claude.com/claude-code)
-skill**, delivered as a Python package. The package is the delivery mechanism —
-it carries the skill directory and provides the `install`/`uninstall` pair that
-puts it where Claude Code looks. It is not a general-purpose CLI.
+This repository ships **one thing: an [Agent Skill](https://agentskills.io)**,
+delivered as a Python package. It runs under
+[Claude Code](https://claude.com/claude-code),
+[Codex](https://developers.openai.com/codex/skills) and
+[GitHub Copilot](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills).
+The package is the delivery mechanism — it carries the skill directory and
+provides the `install`/`uninstall` pair that puts it where each of those looks.
+It is not a general-purpose CLI.
 
 ## Install
 
 ```bash
 pipx install manage-gitignore   # or: pip install manage-gitignore
-manage-gitignore install        # symlink the skill into ~/.claude/skills/
+manage-gitignore install        # link it wherever your agents will find it
 ```
 
-Restart Claude Code, and the skill is available. `install` links rather than
-copies, so upgrading the package upgrades the skill — no second step, and no
-chance of the two drifting. `manage-gitignore uninstall` removes that link
-again, and refuses to touch anything it did not create: a real directory, or a
-link pointing somewhere else, is left alone unless you pass `--force`. Both take
-`--dest` if your skills directory is not `~/.claude/skills`. Removing the
-package itself is `pipx uninstall manage-gitignore`.
+`install` works out which agents are on this machine — a launcher on `PATH`, or
+the product's own configuration directory — and links the skill into each one's
+skills directory:
+
+| Agent | Directory | Reload with |
+| --- | --- | --- |
+| Claude Code | `~/.claude/skills/` | restarting it |
+| Codex | `~/.agents/skills/` | restarting it |
+| GitHub Copilot CLI | `~/.agents/skills/` | `/skills reload` |
+
+Codex and Copilot both read `~/.agents/skills`, so a machine with both gets one
+link rather than the same skill twice. `--dry-run` shows the plan without
+touching anything; `--agent claude` (repeatable), `--all` and `--dest DIR`
+overrule the detection when it guesses wrong or finds nothing.
+
+`install` links rather than copies, so upgrading the package upgrades the skill —
+no second step, and no chance of the two drifting. `manage-gitignore uninstall`
+removes those links again. It sweeps every directory it could have written to,
+not only the ones whose agent is still installed, and refuses to touch anything
+it did not create: a real directory, or a link pointing somewhere else, is left
+alone unless you pass `--force`. Removing the package itself is
+`pipx uninstall manage-gitignore`.
 
 `install` and `uninstall` are the only commands. Everything else happens through
 the skill.
 
 ## Use
 
-Ask Claude Code, in whatever words you would use anyway:
+Ask your agent, in whatever words you would use anyway:
 
 > Give this repo a proper `.gitignore`.
 >
 > Add Rust and JetBrains ignores.
 >
 > What does my `.gitignore` actually cover?
+
+All three match a skill against its description, so asking for the job is
+usually enough. To name it outright: `/manage-gitignore` in Claude Code,
+`$manage-gitignore` in Codex, `/skills` in Copilot.
 
 The skill takes it from there: it scans the repository, proposes a template set
 with the file that justifies each one, asks you to confirm, writes the file

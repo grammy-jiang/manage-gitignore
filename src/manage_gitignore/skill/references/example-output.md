@@ -1,6 +1,6 @@
 # manage-gitignore — example run summary
 
-What `manage-gitignore summary` prints at the end of a run (Step 5). Shown here plain;
+What `scripts/summary.py` prints at the end of a run (Step 5). Shown here plain;
 on an interactive terminal the same output is colorized.
 
 ```text
@@ -60,9 +60,9 @@ NET
   was deliberately left untouched), and the net change in templates and lines.
 
 The JSON facts schema that produces this block is documented at the top of
-`manage-gitignore summary`.
+`scripts/summary.py`.
 
-**Keeping this file honest:** every row above is literal `manage-gitignore summary`
+**Keeping this file honest:** every row above is literal `scripts/summary.py`
 output. If that renderer's wording changes, this example has to be regenerated
 in the same commit — a worked example showing a format the code never emits is
 worse than no example at all.

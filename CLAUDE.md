@@ -19,9 +19,10 @@ every file at 90% coverage. A tag will not build if any of that fails.
 | `src/manage_gitignore/skill/scripts/shared.py` | one sanitiser, one no-follow reader, one JSON contract |
 | `src/manage_gitignore/skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
 | `src/manage_gitignore/cli.py` | the installer: `install` / `uninstall`. Nothing else |
+| `src/manage_gitignore/agents.py` | which agents exist, how to spot one, where each reads skills |
 | `tests/` | pytest suite |
 
-## Four rules that hold the shape
+## Five rules that hold the shape
 
 Each has a test, so breaking one fails the build rather than rotting quietly.
 The tests say *what*; this section says *why*, which is the part worth knowing
@@ -45,9 +46,23 @@ with `PYTHONPATH` *removed*, so a green run is evidence rather than assertion.
 `git` on `PATH`. The skill is installed by symlink, so nothing would ever install
 a dependency on its behalf — an import of anything else is a runtime failure on
 someone else's machine, not a packaging inconvenience. A test walks the scripts'
-ASTs and rejects any import outside stdlib and each other.
+ASTs and rejects any import outside stdlib and each other. The `dev` extra is a
+separate matter: PyYAML is there so the frontmatter test parses `SKILL.md` the
+way the three products do, and it never ships.
 
-**4. The checkout and the installed tree are the same paths.** Nothing is
+**4. The skill is written for three products, not for one.** `SKILL.md` carries
+only the six frontmatter fields the [Agent Skills spec](https://agentskills.io)
+defines — Claude Code accepts a dozen more, and every one of them is a way to
+work on one product and break on another. In the body, name capabilities rather
+than tools: "your file-write tool", not "the Write tool". `AskUserQuestion` is
+Claude Code's and may be named only where the text says so. `agents.py` owns the
+matching half — where each product looks, and how to tell it is installed — so
+adding a fourth is a row in one table. `tests/test_skill_metadata.py` enforces
+all of this, including that no file calls a subcommand that no longer exists,
+which is how `references/push-safety.md` came to tell agents to run
+`manage-gitignore git ... push` for a whole release.
+
+**5. The checkout and the installed tree are the same paths.** Nothing is
 remapped at build time — no `force-include`. `manage_gitignore/skill/scripts/gitwork.py`
 names the same file here and in `site-packages`, so a path in a traceback, or the
 target of the installed symlink, traces back to this repository by relative

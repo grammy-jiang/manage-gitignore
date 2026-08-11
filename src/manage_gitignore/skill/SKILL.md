@@ -1,11 +1,11 @@
 ---
 name: manage-gitignore
 description: Build a repository's .gitignore from gitignore.io, keeping the template block verbatim and the repo's own custom rules intact, then review the diff and — with confirmation — commit and push it. Use when asked to create, refresh, or replace a .gitignore, add ignore rules for a language / editor / OS, inspect an existing .gitignore, or "get a gitignore from gitignore.io".
-allowed-tools:
-  - Read
-  - Write
-  - Bash
-  - AskUserQuestion
+license: MIT
+compatibility: Needs python3 3.10 or newer, plus git and curl on PATH, and outbound HTTPS to gitignore.io. Writes only the .gitignore of the repository it is pointed at, plus temporary files outside it. Runs in any agent that reads the Agent Skills format.
+allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Read Write
+metadata:
+  homepage: https://github.com/grammy-jiang/manage-gitignore
 ---
 
 # manage-gitignore
@@ -28,11 +28,13 @@ closed.
 
 ## Placeholders
 
-`<skill-dir>` is the directory holding this SKILL.md — usually
-`~/.claude/skills/manage-gitignore`. `<repo>` is the repository being worked on.
-Substitute both; never run a command with the angle brackets still in it.
+`<skill-dir>` is the directory holding this SKILL.md —
+`~/.claude/skills/manage-gitignore` under Claude Code,
+`~/.agents/skills/manage-gitignore` under Codex or GitHub Copilot. `<repo>` is
+the repository being worked on. Substitute both; never run a command with the
+angle brackets still in it.
 
-The scripts need only Python 3.11+, `git`, and `curl`. They import each other
+The scripts need only Python 3.10+, `git`, and `curl`. They import each other
 from their own directory, so they run from wherever the skill is installed, with
 nothing to install first. If one is missing, say so and stop; do not fall back to
 hand-written git or a hand-written `.gitignore`.
@@ -40,8 +42,24 @@ hand-written git or a hand-written `.gitignore`.
 **Any non-zero exit stops that action** — report it verbatim. The one exception
 is Step 3's exit 3, documented there.
 
-**If AskUserQuestion is unavailable** (headless), stop at the first choice and
-say which confirmation is needed. Never assume an answer.
+## What this skill needs from you
+
+Two capabilities, named here by what they do rather than by any one agent's
+tool names, because this skill runs under several:
+
+- **Ask a question and wait for the answer.** Claude Code has AskUserQuestion,
+  which renders the options as a menu; elsewhere, ask in prose and wait. Never
+  assume an answer and never proceed on silence. **If no user can be reached at
+  all** — a headless or non-interactive run — stop at the first choice and say
+  which confirmation is missing.
+- **Write and read a file directly.** Where a step says to write a file, use
+  your file-write tool rather than a shell heredoc — the last rule under
+  [Rules](#rules) says why that distinction matters.
+
+The scripts reach gitignore.io over the network with `curl`, and put temporary
+files outside the repository. **If a sandbox denies either**, report what it
+said, verbatim, and stop. A `.gitignore` you wrote from memory is not the one
+the user asked for.
 
 ## Step 0 — Inspect only
 
@@ -83,7 +101,7 @@ See [references/asking-the-user.md](references/asking-the-user.md) when the set
 does not fit one question. **`carried_over` is never truncated.**
 
 The final list is `always_on` plus whatever the user selected. **Write it to a
-file with the Write tool**, one name per line, at a `mktemp` path outside the
+file with your file-write tool**, one name per line, at a `mktemp` path outside the
 repo — free-text names must never reach a command line, for the same reason
 commit messages go through a file.
 
@@ -160,7 +178,7 @@ tree and show the user their own edit as if this run had made it.
 
 It picks the right command for the file's state and returns the real diff — show
 it. For an `untracked` file that diff is a one-line stub, so also show the file
-itself (`cat`, or the Read tool); on a first run the Step 3 flags are otherwise
+itself (your file-read tool, or `cat`); on a first run the Step 3 flags are otherwise
 the only review surface. If `suspicious_characters` is true, say so: the terminal
 may not be rendering what the file says.
 
@@ -197,8 +215,8 @@ change and not an intention:
   `suspicious_characters` is true, say that too. If `permits_push` is false, say
   a push looks unlikely and why; the three options below never change.
 
-Then AskUserQuestion — exactly these, never an "also commit other changes"
-option: **Commit + push** / **Commit only** (local) / **Don't commit**.
+Then ask — exactly these three, never an "also commit other changes" option:
+**Commit + push** / **Commit only** (local) / **Don't commit**.
 
 ### 3. Commit
 

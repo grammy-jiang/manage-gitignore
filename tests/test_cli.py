@@ -350,6 +350,192 @@ class TestRoundTrip:
         assert sorted(os.listdir(skills)) == before
 
 
+class TestDetectedInstall:
+    """`install` with no arguments acts where an agent was actually found.
+
+    PATH and HOME are both redirected in every test here: otherwise the answer
+    would depend on what the person running the suite has installed, and the
+    suite would say something different on CI than on a laptop.
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("PATH", str(bindir))
+        return home
+
+    def test_links_where_the_detected_agent_looks(self, isolated, capsys):
+        (isolated / ".claude").mkdir()
+        assert cli.main(["install"]) == 0
+        assert (isolated / ".claude" / "skills" / cli.SKILL_NAME).is_symlink()
+        assert not (isolated / ".agents").exists()
+        assert "Claude Code detected" in capsys.readouterr().out
+
+    def test_codex_and_copilot_get_one_link_between_them(self, isolated):
+        """Two links of the same name would show up twice in Copilot's list."""
+        (isolated / ".codex").mkdir()
+        (isolated / ".copilot").mkdir()
+        assert cli.main(["install"]) == 0
+        assert (isolated / ".agents" / "skills" / cli.SKILL_NAME).is_symlink()
+        assert sorted(os.listdir(isolated / ".agents" / "skills")) == [cli.SKILL_NAME]
+
+    def test_finding_nothing_is_an_error_that_names_what_it_looked_for(self, isolated, capsys):
+        """Guessing a destination would be worse than refusing to."""
+        assert cli.main(["install"]) == 1
+        err = capsys.readouterr().err
+        assert "no supported agent found" in err
+        for binary in ("claude", "codex", "copilot"):
+            assert binary in err
+        assert not (isolated / ".claude").exists()
+
+    def test_all_does_not_wait_to_be_detected(self, isolated):
+        assert cli.main(["install", "--all"]) == 0
+        assert (isolated / ".claude" / "skills" / cli.SKILL_NAME).is_symlink()
+        assert (isolated / ".agents" / "skills" / cli.SKILL_NAME).is_symlink()
+
+    def test_naming_an_agent_acts_and_says_it_was_not_detected(self, isolated, capsys):
+        assert cli.main(["install", "--agent", "codex"]) == 0
+        assert (isolated / ".agents" / "skills" / cli.SKILL_NAME).is_symlink()
+        assert not (isolated / ".claude").exists()
+        assert "not detected" in capsys.readouterr().out
+
+    def test_naming_an_agent_that_is_there_says_nothing_about_detection(self, isolated, capsys):
+        """The note is a warning, not a running commentary."""
+        (isolated / ".claude").mkdir()
+        assert cli.main(["install", "--agent", "claude"]) == 0
+        assert "not detected" not in capsys.readouterr().out
+
+    def test_an_unknown_agent_name_is_refused(self, isolated):
+        with pytest.raises(SystemExit):
+            cli.main(["install", "--agent", "emacs"])
+
+    def test_dry_run_changes_nothing(self, isolated, capsys):
+        (isolated / ".claude").mkdir()
+        assert cli.main(["install", "--dry-run"]) == 0
+        assert not (isolated / ".claude" / "skills").exists()
+        assert "Would link" in capsys.readouterr().out
+
+    def test_dry_run_reports_a_refusal_rather_than_promising_the_link(self, isolated, capsys):
+        """A dry run is checked precisely so a refusal is not a surprise later.
+
+        Defect this pins: `--dry-run` printed "Would link" for a destination the
+        real run would refuse, and exited 0 while the real run exits 1.
+        """
+        (isolated / ".claude").mkdir()
+        blocked = isolated / ".claude" / "skills" / cli.SKILL_NAME
+        blocked.mkdir(parents=True)
+        assert cli.main(["install", "--dry-run"]) == 1
+        captured = capsys.readouterr()
+        assert "Would link" not in captured.out
+        assert "already exists and is not a symlink" in captured.err
+        assert list(os.listdir(blocked)) == []
+
+    def test_dry_run_with_force_promises_what_force_would_do(self, isolated, capsys):
+        (isolated / ".claude").mkdir()
+        (isolated / ".claude" / "skills" / cli.SKILL_NAME).mkdir(parents=True)
+        assert cli.main(["install", "--dry-run", "--force"]) == 0
+        assert "Would link" in capsys.readouterr().out
+
+    def test_one_refused_target_does_not_cost_the_others(self, isolated, capsys):
+        """A refusal on one directory must not silently skip the rest, and must
+        still be an exit code rather than a line on stdout."""
+        (isolated / ".claude").mkdir()
+        (isolated / ".codex").mkdir()
+        blocked = isolated / ".agents" / "skills" / cli.SKILL_NAME
+        blocked.mkdir(parents=True)
+        assert cli.main(["install"]) == 1
+        assert (isolated / ".claude" / "skills" / cli.SKILL_NAME).is_symlink()
+        assert blocked.is_dir()
+        assert "manage-gitignore:" in capsys.readouterr().err
+
+    def test_it_names_the_reload_step_for_every_agent_it_linked_for(self, isolated, capsys):
+        assert cli.main(["install", "--all"]) == 0
+        out = capsys.readouterr().out
+        assert "restart Claude Code" in out
+        assert "/skills reload" in out
+
+
+class TestSweepingUninstall:
+    """`uninstall` with no arguments sweeps every directory it could have
+    written to, detected or not: a link outlives the product that read it, and
+    that is exactly when leaving it behind would be worst."""
+
+    @pytest.fixture(autouse=True)
+    def isolated(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("PATH", str(bindir))
+        return home
+
+    def test_removes_links_for_agents_no_longer_installed(self, isolated):
+        assert cli.main(["install", "--all"]) == 0
+        assert cli.main(["uninstall"]) == 0
+        assert not (isolated / ".claude" / "skills" / cli.SKILL_NAME).exists()
+        assert not (isolated / ".agents" / "skills" / cli.SKILL_NAME).exists()
+
+    def test_nothing_anywhere_is_not_an_error(self, capsys):
+        assert cli.main(["uninstall"]) == 0
+        assert "Nothing to remove" in capsys.readouterr().out
+
+    def test_it_leaves_a_stranger_alone_and_exits_non_zero(self, isolated, capsys):
+        cli.main(["install", "--all"])
+        stranger = isolated / ".agents" / "skills" / cli.SKILL_NAME
+        stranger.unlink()
+        stranger.mkdir()
+        assert cli.main(["uninstall"]) == 1
+        assert stranger.is_dir()
+        assert not (isolated / ".claude" / "skills" / cli.SKILL_NAME).exists()
+        assert "not a symlink" in capsys.readouterr().err
+
+    def test_naming_an_absent_agent_still_cleans_up_after_it(self, isolated, capsys):
+        """Uninstalling for a product you have already removed is the case this
+        command most needs to handle, so it must not read as an error."""
+        cli.main(["install", "--agent", "codex"])
+        assert cli.main(["uninstall", "--agent", "codex"]) == 0
+        out = capsys.readouterr().out
+        assert "not detected" in out
+        assert not (isolated / ".agents" / "skills" / cli.SKILL_NAME).exists()
+
+    def test_dry_run_reports_a_refusal_rather_than_nothing_to_do(self, isolated, capsys):
+        """Defect this pins: any non-symlink read as "Nothing at ...", so a real
+        directory in the way -- which the real run refuses -- looked like a
+        clean no-op."""
+        stranger = isolated / ".claude" / "skills" / cli.SKILL_NAME
+        stranger.mkdir(parents=True)
+        assert cli.main(["uninstall", "--dry-run"]) == 1
+        captured = capsys.readouterr()
+        # The other swept directory is genuinely empty and says so; the one in
+        # the way must not be reported as a clean no-op alongside it.
+        assert str(stranger) not in captured.out
+        assert "not a symlink" in captured.err
+        assert stranger.is_dir()
+
+    def test_dry_run_reports_a_foreign_link_it_would_not_touch(self, isolated, capsys):
+        elsewhere = isolated / "elsewhere"
+        elsewhere.mkdir()
+        link = isolated / ".agents" / "skills" / cli.SKILL_NAME
+        link.parent.mkdir(parents=True)
+        link.symlink_to(elsewhere, target_is_directory=True)
+        assert cli.main(["uninstall", "--dry-run"]) == 1
+        assert "not a packaged skill" in capsys.readouterr().err
+        assert link.is_symlink()
+
+    def test_dry_run_reports_both_states_and_removes_nothing(self, isolated, capsys):
+        cli.main(["install", "--agent", "claude"])
+        assert cli.main(["uninstall", "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert "Would remove" in out
+        assert "Nothing at" in out
+        assert (isolated / ".claude" / "skills" / cli.SKILL_NAME).is_symlink()
+
+
 class TestDispatch:
     @pytest.mark.parametrize("flag", ["-V", "--version"])
     def test_version(self, flag, capsys):
