@@ -91,7 +91,10 @@ class TestDetection:
         exe = put_binary(empty_path, "copilot")
         on_path = agents.detect(agents.BY_KEY["copilot"], home=home)
         assert on_path.evidence is not None
-        assert str(exe) in on_path.evidence
+        # Case-insensitively: `shutil.which` reports the extension as PATHEXT
+        # spells it, which is upper case on Windows, while the file this fixture
+        # created is `copilot.cmd`. The same path, written two ways.
+        assert str(exe).lower() in on_path.evidence.lower()
 
         (home / ".codex").mkdir()
         by_config = agents.detect(agents.BY_KEY["codex"], home=home)

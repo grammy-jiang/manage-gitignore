@@ -59,7 +59,10 @@ class TestSkillSource:
         stand_in.parent.mkdir(parents=True)
         stand_in.touch()
         monkeypatch.setattr(cli, "__file__", str(stand_in))
-        with pytest.raises(FileNotFoundError, match=str(tmp_path / "pkg" / "skill")):
+        # re.escape: `match` is a regular expression, and a Windows path is full
+        # of backslashes -- `C:\Users\...` reads as an incomplete `\U` escape and
+        # fails before the assertion is even attempted.
+        with pytest.raises(FileNotFoundError, match=re.escape(str(tmp_path / "pkg" / "skill"))):
             cli.skill_source()
 
     def test_nothing_remaps_the_skill_at_build_time(self):
