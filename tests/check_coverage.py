@@ -1,11 +1,11 @@
 """Fail the build when any single file falls below the coverage floor.
 
 A project total hides a hole: one thoroughly covered 800-line script can carry
-a barely-touched 200-line one well past 90% overall. `coverage report` has no
+a barely-touched 200-line one well past 95% overall. `coverage report` has no
 per-file threshold, so the check lives here and both `make coverage` and CI run
 this same file rather than two thresholds that can drift apart.
 
-    python3 tests/check_coverage.py [--min 90]
+    python3 tests/check_coverage.py [--min 95]
 """
 
 from __future__ import annotations
@@ -38,7 +38,10 @@ def measured(rcfile: str = "pyproject.toml") -> dict[str, float]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--min", type=float, default=90.0, help="floor per file (default: 90)")
+    # The default is the policy, not a placeholder: `make coverage` and CI both
+    # pass --min explicitly, and someone running this script by hand should get
+    # the same answer they would have got from either.
+    parser.add_argument("--min", type=float, default=95.0, help="floor per file (default: 95)")
     args = parser.parse_args()
 
     files = measured()

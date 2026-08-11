@@ -6,7 +6,7 @@ whoever is editing it.
 
 Run `make verify` before you push, and `make coverage` if you touched a script.
 CI runs the tests on 3.10 through 3.14, lints and type-checks on 3.10, gates
-every file at 90% coverage, and runs every pre-commit hook. A tag will not build
+every file at 95% coverage, and runs every pre-commit hook. A tag will not build
 if any of that fails.
 
 `pre-commit install` once, so the hooks run where they are cheap to fix.
@@ -130,10 +130,12 @@ script under two module names at once — `manage_gitignore.skill.scripts.shared
 
 ### Coverage
 
-**Every file must stay at or above 90%**, enforced by `tests/check_coverage.py`
+**Every file must stay at or above 95%**, enforced by `tests/check_coverage.py`
 in both `make coverage` and CI. The floor is per file on purpose: a project
 total hides a hole, because one thoroughly covered 800-line script carries a
-barely-touched 200-line one well past 90% overall.
+barely-touched 200-line one well past 95% overall. The floor was 90% until every
+file had been at 97.9% or better for long enough that 90 was not a floor at all,
+only a number nothing could fail.
 
 Measuring needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
 the suite drives the scripts as subprocesses, which a plain coverage run cannot
