@@ -172,7 +172,9 @@ Coverage says a line ran. It does not say the tests would notice if that line
 were wrong, and at 99% that is the only question left. `tests/mutate.py` answers
 it: it changes one operator or literal at a time in `templates.py`, runs the two
 test files that cover it, and reports what survived. By hand, never in CI —
-`python3 tests/mutate.py`, about a minute on eight cores.
+`python3 tests/mutate.py`, about a minute on eight cores. `--all-functions`
+covers the impure half too, and costs tens of minutes rather than one; see
+"What the audits cover" below.
 
 The first run scored **78/90**. The twelve survivors were: which `### Name ###`
 section a dropped rule is attributed to (four), the fallback when a rule sits
@@ -227,6 +229,64 @@ fixture built to defeat it rather than to describe a run:
 Four audits, one finding: what goes unchecked is not the logic, it is the
 sentence the logic produces. Asserting that a message exists leaves every word
 of it free.
+
+#### What the audits cover, and what they do not
+
+Everything above ran on the *pure* half of its subject, because that is what
+keeps a run to a minute. `--all-functions` covers the rest, and has now been run
+once against both scripts that have an impure half: **`gitwork.py` 576/742** and
+**`templates.py` 416/538**, from 559 and 405 before the gaps were pinned. Both
+runs are harness-clean — nothing unscored.
+
+Three fixes to `mutate.py` came first, because the run could not finish:
+
+- **The `if __name__ == "__main__":` guard is never mutated.** Flipping `==` to
+  `!=` makes the module run `main()` when it is *imported*, so pytest exits
+  during collection with INTERNALERROR — neither pass nor failure, and nothing
+  about the mutant is learned. Excluded for the same reason docstrings are: a
+  guaranteed non-result at the price of a full test run. The `"__main__"`
+  literal stays mutable, because emptying it stops `python3 gitwork.py --status`
+  doing anything and the suite drives exactly that.
+- **An unscoreable mutant no longer aborts the run.** The first attempt lost
+  seven workers' results to one such mutant at index 743 of 744. It is reported
+  separately now and leaves the denominator: counting an INTERNALERROR as a kill
+  is the same lie as counting a missing dependency as one.
+- **A per-mutant timeout**, from the measured baseline rather than a constant,
+  since the same audit runs on a laptop and on twenty cores. Without it a
+  mutated loop bound stalls a worker for the rest of the run, silently.
+
+The impure halves are where the safety properties live, and three of them were
+unchecked. `check=True` survived on all three `git push` calls — with
+`check=False` a rejected push is reported as `"pushed": true` and recorded in
+the facts file, so the agent tells the user their work is on the remote when it
+is not. Nothing looked at `GIT_TERMINAL_PROMPT=0` or `protocol.ext.allow=never`.
+And curl's `-fsS` could be deleted: without `-f` curl prints the server's error
+page as the body and exits 0, so a 404 becomes the text this tool treats as a
+template block. A test named `--proto`, `-L` and both bounds, and still missed
+it — which is the argument for asserting the whole command line rather than the
+flags somebody thought of.
+
+The survivors that remain are the same shape as every earlier audit, at the
+largest scale yet: of 166 in `gitwork.py`, 121 are string literals; of 122 in
+`templates.py`, 85 are. What is left is deliberate. `main` in both files is
+argparse wiring, and a test asserting help text is a second copy of the help
+text that will drift from the first. The rest are diagnostics on paths whose
+*behaviour* is already checked.
+
+Recorded as equivalent rather than chased:
+
+| Mutation | Why it cannot be reached |
+| --- | --- |
+| `or` → `and` in `check_api_block`'s header guard | with `and`, a `# Created by` line lacking `/api/` falls through to the URL check — and any string passing *that* check contains `/api/`, since `API` ends in `/api` |
+| `FETCH_MAX_SECONDS + 10` → `- 10`, and `10 → 11` | the grace period on top of a 20s bound; no reachable input distinguishes them |
+| `65536 → 65537` in the read loop | a chunk size, not a bound: the cap is checked against the accumulated body |
+
+Two of the tests written for this audit passed while proving nothing, and only
+re-applying the mutation found it: one measured against `MAX_ERR_LEN` itself, so
+`400 → 401` moved the test along with the code, and one used a one-character
+line to exercise an 80-character slice. **A check that derives its expectation
+from the thing it is checking cannot fail.** Verify a new test by breaking the
+code it claims to protect.
 
 Measuring coverage needs `MG_COVER_SUBPROCESS=1` (which `make coverage` sets). Most of
 the suite drives the scripts as subprocesses, which a plain coverage run cannot

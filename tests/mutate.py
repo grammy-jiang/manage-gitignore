@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -163,10 +164,32 @@ class Mutator(ast.NodeTransformer):
         self.found: list[Mutation] = []
         self._stack: list[str] = []
         self._docstrings: set[int] = set()
+        self._entrypoint_tests: set[int] = set()
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
         self._note_docstrings(node)
+        self._note_entrypoint_guard(node)
         return self.generic_visit(node)
+
+    def _note_entrypoint_guard(self, node: ast.Module) -> None:
+        """Remember `if __name__ == "__main__":` so its operator is never flipped.
+
+        Not an exclusion for tidiness: `==` to `!=` there makes the module run
+        `main()` when it is *imported*, so `import gitwork` parses argparse's
+        view of pytest's own argv and exits. pytest cannot collect a module that
+        exits during import, so it stops with INTERNALERROR and exit code 3 --
+        neither pass nor failure, and nothing about the mutant is learned.
+
+        The `"__main__"` literal itself stays mutable. Emptying it stops
+        `python3 gitwork.py --status` doing anything, which the suite drives as a
+        subprocess and does notice.
+        """
+        for child in ast.walk(node):
+            if not isinstance(child, ast.If) or not isinstance(child.test, ast.Compare):
+                continue
+            left = child.test.left
+            if isinstance(left, ast.Name) and left.id == "__name__":
+                self._entrypoint_tests.add(id(child.test))
 
     def _note_docstrings(self, node: ast.AST) -> None:
         """Remember docstring nodes so they are never mutated.
@@ -209,7 +232,10 @@ class Mutator(ast.NodeTransformer):
         return index == self.wanted
 
     def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        entrypoint = id(node) in self._entrypoint_tests
         self.generic_visit(node)
+        if entrypoint:
+            return node
         for position, op in enumerate(node.ops):
             replacement = COMPARISONS.get(type(op))
             if replacement is None:
@@ -273,18 +299,33 @@ def mutated_source(source: str, index: int, functions: set[str] | None) -> str:
 PYTEST_PASSED = 0
 PYTEST_TESTS_FAILED = 1
 
+# What a mutant is allowed to do to the clock before the run gives up on it, as
+# a multiple of how long the unmutated suite takes. A mutation can turn a loop
+# bound around -- `fetch_bytes` reads its response in a `while` -- and without a
+# limit one such mutant stalls a worker for the rest of the audit, silently,
+# because nothing prints until a batch finishes.
+TIMEOUT_FACTOR = 6
+TIMEOUT_FLOOR = 120.0
 
-def run_tests(workspace: Path, subject: Subject) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *subject.tests],
-        cwd=workspace,
-        capture_output=True,
-    )
+
+def run_tests(
+    workspace: Path, subject: Subject, timeout: float | None = None
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run the subject's tests. None means the mutant ran out of time."""
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", "-x", "-q", "-n", "0", *subject.tests],
+            cwd=workspace,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def run_batch(
-    args: tuple[Path, Subject, str, list[int], set[str] | None],
-) -> list[tuple[int, bool]]:
+    args: tuple[Path, Subject, str, list[int], set[str] | None, float],
+) -> list[tuple[int, bool | None, str]]:
     """Run a batch of mutations in one workspace, one after another.
 
     The batches are round-robin slices of the mutation list, so a worker's
@@ -292,20 +333,26 @@ def run_batch(
     belongs to exactly one worker. A workspace holds one mutated file at a time,
     so two tasks sharing one would overwrite each other's mutation and report on
     whichever won the race.
+
+    Each result is (index, survived, why). `survived` is None when the run could
+    not be scored at all -- see `main` for why that is reported rather than
+    raised.
     """
-    workspace, subject, source, indexes, functions = args
-    results = []
+    workspace, subject, source, indexes, functions, timeout = args
+    results: list[tuple[int, bool | None, str]] = []
     for index in indexes:
         target = workspace / subject.path
         target.write_text(mutated_source(source, index, functions), encoding="utf-8")
-        done = run_tests(workspace, subject)
-        if done.returncode not in (PYTEST_PASSED, PYTEST_TESTS_FAILED):
-            raise RuntimeError(
-                f"pytest exited {done.returncode} on mutation {index}, which is neither "
-                f"pass nor failure -- the run cannot be scored. Last output:\n"
-                f"{done.stdout.decode(errors='replace')[-2000:]}"
+        done = run_tests(workspace, subject, timeout)
+        if done is None:
+            results.append((index, None, f"still running after {timeout:.0f}s"))
+        elif done.returncode in (PYTEST_PASSED, PYTEST_TESTS_FAILED):
+            results.append((index, done.returncode == PYTEST_PASSED, ""))
+        else:
+            tail = done.stdout.decode(errors="replace").strip().splitlines()
+            results.append(
+                (index, None, f"pytest exited {done.returncode}: {tail[-1][:120] if tail else ''}")
             )
-        results.append((index, done.returncode == PYTEST_PASSED))
     return results
 
 
@@ -347,7 +394,9 @@ def main() -> int:
         # a missing dependency or a broken fixture makes every mutant look
         # killed, and the report says the suite is perfect precisely when it is
         # not running. The baseline runs in a workspace no mutation has touched.
+        started = time.monotonic()
         baseline = run_tests(workspaces[0], subject)
+        assert baseline is not None  # no timeout is passed for the baseline
         if baseline.returncode != PYTEST_PASSED:
             print(
                 f"the tests do not pass unmutated (pytest exited {baseline.returncode}), "
@@ -356,27 +405,44 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
-        print("  baseline: the suite passes unmutated")
+        # Derived from this machine rather than fixed: the same audit runs on a
+        # laptop and on twenty cores, and a constant would either strangle the
+        # slow one or let the fast one hang for minutes.
+        timeout = max(TIMEOUT_FLOOR, TIMEOUT_FACTOR * (time.monotonic() - started))
+        print(f"  baseline: the suite passes unmutated; giving each mutant {timeout:.0f}s")
 
         survivors: list[Mutation] = []
+        unscored: list[tuple[Mutation, str]] = []
         batches: list[list[int]] = [[] for _ in range(args.workers)]
         for position, mutation in enumerate(found):
             batches[position % args.workers].append(mutation.index)
         work = [
-            (workspaces[worker], subject, source, batch, functions)
+            (workspaces[worker], subject, source, batch, functions, timeout)
             for worker, batch in enumerate(batches)
             if batch
         ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             for finished, batch in enumerate(pool.map(run_batch, work), 1):
-                survivors.extend(found[index] for index, survived in batch if survived)
-                print(f"  worker {finished}/{len(work)} done, {len(survivors)} survived so far")
+                survivors.extend(found[i] for i, survived, _ in batch if survived)
+                unscored.extend((found[i], why) for i, survived, why in batch if survived is None)
+                print(
+                    f"  worker {finished}/{len(work)} done, {len(survivors)} survived so far"
+                    + (f", {len(unscored)} unscored" if unscored else "")
+                )
 
-    print(f"\n{len(found) - len(survivors)}/{len(found)} killed")
+    # An unscoreable mutant is not a killed one. Counting it as a kill is the
+    # same lie as counting a missing dependency as a kill, so it leaves the
+    # denominator and is reported on its own.
+    scored = len(found) - len(unscored)
+    print(f"\n{scored - len(survivors)}/{scored} killed")
     if survivors:
         print("\nSurvived -- the suite runs these lines without checking them:")
         for mutation in sorted(survivors, key=lambda m: m.line):
             print(f"  {subject.path.name}:{mutation.line:<5} {mutation.description}")
+    if unscored:
+        print(f"\nUnscored -- {len(unscored)} of {len(found)} could not be run at all:")
+        for mutation, why in sorted(unscored, key=lambda pair: pair[0].line):
+            print(f"  {subject.path.name}:{mutation.line:<5} {mutation.description}  ({why})")
     return 1 if survivors else 0
 
 

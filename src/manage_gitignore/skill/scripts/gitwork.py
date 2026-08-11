@@ -61,7 +61,9 @@ EXIT_NEEDS_EXPECT = 6  # a force was asked for without the approved sha
 
 def die(msg: str) -> NoReturn:
     print(f"gitwork: {msg}", file=sys.stderr)
-    sys.exit(1)
+    # The constant, not a literal 1. They were two statements of one fact, and
+    # the unreferenced one is the fact a mutation audit could change freely.
+    sys.exit(EXIT_ERROR)
 
 
 def emit(payload: Mapping[str, object]) -> None:
