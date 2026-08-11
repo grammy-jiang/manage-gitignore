@@ -28,6 +28,18 @@ repos:
   # Same two commands `make verify` and CI run, at the point where fixing them
   # is cheapest. The rev tracks the `ruff>=0.5` dev dependency; when they drift,
   # the hook and the gate disagree about what the code should look like.
+  # The workflows are code too, and the only code here that runs with a token.
+  # zizmor reads them for the mistakes YAML cannot have an opinion about:
+  # credentials left in .git/config, a cache restored into a publishing job,
+  # permissions wider than the job needs.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+      - id: zizmor
+        # Every finding, not just the default set. The two extra classes it adds
+        # are jobs without names and permissions without a comment saying why --
+        # both worth keeping in a workflow that publishes to PyPI.
+        args: ["--no-progress", "--persona=auditor"]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.2
     hooks:
