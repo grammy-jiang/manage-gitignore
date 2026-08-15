@@ -299,6 +299,11 @@ def mutated_source(source: str, index: int, functions: set[str] | None) -> str:
 PYTEST_PASSED = 0
 PYTEST_TESTS_FAILED = 1
 
+# This tool's own exit codes: 0 every mutation died, 1 some survived, and this
+# one for a run whose score does not mean what it says -- the tests failed
+# before anything was mutated, or some mutants could not be run at all.
+EXIT_UNSOUND = 2
+
 # What a mutant is allowed to do to the clock before the run gives up on it, as
 # a multiple of how long the unmutated suite takes. A mutation can turn a loop
 # bound around -- `fetch_bytes` reads its response in a `while` -- and without a
@@ -356,6 +361,21 @@ def run_batch(
     return results
 
 
+def verdict(survivors: list[Mutation], unscored: list[tuple[Mutation, str]]) -> int:
+    """The exit status for a finished run.
+
+    An unscored mutant outranks a clean sweep. Reporting success because nothing
+    happened to survive, when some mutations were never actually tried, is the
+    same failure this tool exists to catch one level up -- a green result
+    standing in for a check that did not run. It is the status a failing
+    baseline gets, because both mean the same thing: the score does not mean
+    what it says.
+    """
+    if unscored:
+        return EXIT_UNSOUND
+    return 1 if survivors else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
@@ -404,7 +424,7 @@ def main() -> int:
                 f"{baseline.stdout.decode(errors='replace')[-2000:]}",
                 file=sys.stderr,
             )
-            return 2
+            return EXIT_UNSOUND
         # Derived from this machine rather than fixed: the same audit runs on a
         # laptop and on twenty cores, and a constant would either strangle the
         # slow one or let the fast one hang for minutes.
@@ -443,7 +463,7 @@ def main() -> int:
         print(f"\nUnscored -- {len(unscored)} of {len(found)} could not be run at all:")
         for mutation, why in sorted(unscored, key=lambda pair: pair[0].line):
             print(f"  {subject.path.name}:{mutation.line:<5} {mutation.description}  ({why})")
-    return 1 if survivors else 0
+    return verdict(survivors, unscored)
 
 
 if __name__ == "__main__":
