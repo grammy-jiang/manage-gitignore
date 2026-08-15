@@ -89,6 +89,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # The tagged commit's own timestamp, which is a property of the tag rather
+      # than of when this job happened to run. Read from git rather than passed
+      # in, so re-running the workflow on the same tag produces the same value.
+      - name: Take the timestamp from the commit
+        id: stamp
+        run: echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+
       # No `cache: pip` here, deliberately, and this is the one job where that
       # matters: a cache is writable by workflow runs with fewer privileges than
       # this one, so restoring it into the job that builds what gets published
@@ -99,10 +106,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The pinned `build`, from the dev extra. `pip install build` took
+      # whatever released that morning into the one job whose output is
+      # published to PyPI -- the last place an unreviewed version should turn
+      # up. Installing the extra also costs nothing here: this job deliberately
+      # has no pip cache.
       - name: Install
-        run: python -m pip install --upgrade pip && pip install build
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
 
+      # SOURCE_DATE_EPOCH makes the artifacts reproducible: without it every
+      # file in the wheel is stamped with the moment the runner happened to
+      # unpack it, so two builds of one tag differ and "this artifact is that
+      # tag" cannot be checked by anybody. With it, the timestamps come from the
+      # tagged commit, and a rebuild of the tag is byte-identical.
       - name: Build sdist and wheel
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.stamp.outputs.epoch }}
         run: python -m build
 
       - name: Check metadata

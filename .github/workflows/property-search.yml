@@ -1,0 +1,73 @@
+name: Property search
+
+# The randomness the gate gave up.
+#
+# `make verify` runs Hypothesis derandomised, so a commit's result is a property
+# of the commit: the same tree draws the same examples everywhere, and a failure
+# reproduces by re-running it. That is the right trade for a merge gate and the
+# wrong one for finding bugs, because a search that asks the same question every
+# time stops answering after the first run.
+#
+# So the search lives here instead: seed free, budget an order of magnitude
+# larger, on a schedule. A red run is news rather than a blocked merge, and the
+# counterexample it prints is the thing worth having.
+
+on:
+  schedule:
+    - cron: "23 4 * * 3" # Wednesdays, off the hour: shared runners are busiest at :00
+  workflow_dispatch:
+    inputs:
+      max_examples:
+        description: "Examples per property (default: the explore profile's 2000)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: property-search
+  cancel-in-progress: true
+
+jobs:
+  search:
+    name: Look for a counterexample the gate would never draw
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # persist-credentials: false -- checkout otherwise leaves the job's
+        # GITHUB_TOKEN in .git/config, where anything that later archives the
+        # workspace would carry it out with them. Nothing here pushes with git.
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      # Only the property files. The example-based tests are deterministic
+      # already, so running them here would spend thirty minutes re-proving what
+      # every pull request has just proved.
+      - name: Search
+        # Through the environment rather than `${{ }}` in the script body: the
+        # input is workflow_dispatch text and this is the habit zizmor exists to
+        # enforce, instance by instance.
+        env:
+          HYPOTHESIS_PROFILE: explore
+          HYPOTHESIS_MAX_EXAMPLES: ${{ inputs.max_examples }}
+        run: |
+          python -m pytest \
+            tests/test_merge_properties.py \
+            tests/test_gitwork_properties.py \
+            tests/test_summary_properties.py
+
+      - name: Say what a failure here means
+        if: failure()
+        run: |
+          echo "::error::a property failed under random search -- the printed \
+          falsifying example is a real input the derandomised gate never drew. \
+          Add it to the example-based tests, then fix it."

@@ -37,29 +37,50 @@ Issues = "https://github.com/grammy-jiang/manage-gitignore/issues"
 # three products that each parse it with a real YAML parser, so the test that
 # holds it to the Agent Skills spec must parse it the same way. The skill itself
 # still imports nothing outside the standard library -- see tests/test_cli.py.
+# Every version is exact, not a floor. A floor means CI installs whatever
+# released that morning, so the same commit can pass today and fail tomorrow
+# with nothing in this repository having changed -- and the failure arrives on
+# somebody else's unrelated pull request. `filterwarnings = ["error"]` sharpens
+# that considerably: one new DeprecationWarning anywhere in this list turns the
+# suite red. mypy is the same story in a different shape, since a minor release
+# adds checks.
+#
+# Exact pins are only safe while something watches them, or they are just old
+# versions: .github/dependabot.yml opens the bump weekly, after a seven-day
+# cooldown, where it meets the same gates as any other change. Nothing here is
+# a runtime dependency -- the skill still imports nothing outside the standard
+# library (tests/test_cli.py), so no user's environment is constrained by any
+# of this.
 dev = [
-    "pytest>=7.0",
-    "pytest-cov>=5.0",
-    "pytest-xdist>=3.5",
-    # Pinned, not floored: .pre-commit-config.yaml names an exact ruff, and a
-    # hook that formats differently from the gate is worse than no hook. The
-    # two move together or not at all.
+    "pytest==9.0.1",
+    "pytest-cov==7.0.0",
+    "pytest-xdist==3.8.0",
+    # ruff was pinned before the rest, and for an additional reason:
+    # .pre-commit-config.yaml names an exact ruff, and a hook that formats
+    # differently from the gate is worse than no hook. The two move together or
+    # not at all.
     "ruff==0.16.2",
-    "mypy>=1.8",
-    "pyyaml>=6.0",
-    "types-PyYAML>=6.0",
+    "mypy==1.19.0",
+    # PyYAML is a *test* dependency only: SKILL.md's frontmatter is a contract
+    # with three products that each parse it with a real YAML parser, so the
+    # test holding it to the Agent Skills spec must parse it the same way.
+    "pyyaml==6.0.3",
+    "types-PyYAML==6.0.12.20250915",
     # tests/test_merge_properties.py states the merge's invariants and lets
-    # Hypothesis look for a counterexample. Test-only, like PyYAML; the skill
-    # still imports nothing outside the standard library.
-    "hypothesis>=6.100",
+    # Hypothesis look for a counterexample. Test-only, like PyYAML.
+    "hypothesis==6.165.3",
     # `make build` already assumed this; tests/test_packaging.py builds a wheel
     # and reads what came out, so now it is declared rather than assumed.
-    "build>=1.0",
+    "build==1.5.0",
     # The build backend, declared a second time on purpose. [build-system] tells
     # a *builder* to fetch it into an isolated environment -- over the network,
     # which no test here may need. Having it installed lets that test build with
     # --no-isolation and stay offline.
-    "hatchling",
+    "hatchling==1.32.0",
+    # Installed by the hooks job rather than named inline in the workflow. A
+    # version pinned in a `run:` step is one Dependabot cannot see, which is the
+    # stale-pin problem dependabot.yml warns about for pre-commit's own revs.
+    "pre-commit==4.6.0",
 ]
 
 [project.scripts]

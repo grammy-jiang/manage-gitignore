@@ -12,6 +12,7 @@ nowhere in the checkout, so a traceback could not be traced back.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tarfile
@@ -121,6 +122,52 @@ class TestTheSdistCarriesTheSkillToo:
         root = roots.pop()
         missing = [f for f in SKILL_FILES if f"{root}/src/{f}" not in names]
         assert missing == []
+
+
+@pytest.mark.slow
+class TestTheBuildIsReproducible:
+    """Two builds of one tree must produce the same bytes.
+
+    Without `SOURCE_DATE_EPOCH` every member of the archive is stamped with the
+    moment the builder happened to unpack it, so the artifact for a tag differs
+    on every rebuild and "this file is that tag" is a claim nobody can check --
+    including the person publishing it.
+
+    The release workflow takes the value from the tagged commit, which is a
+    property of the tag rather than of when the job ran, so re-running it on the
+    same tag rebuilds the same bytes. This asserts the property that setting is
+    for, rather than asserting the setting.
+    """
+
+    @staticmethod
+    def _build(out: Path, epoch: str) -> bytes:
+        subprocess.run(
+            [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(out), str(REPO)],
+            capture_output=True,
+            check=True,
+            env={**os.environ, "SOURCE_DATE_EPOCH": epoch},
+        )
+        made = list(out.glob("*.whl"))
+        assert len(made) == 1, f"expected one wheel, got {made}"
+        return made[0].read_bytes()
+
+    def test_the_same_epoch_gives_the_same_wheel(self, tmp_path):
+        if not (REPO / "pyproject.toml").is_file():  # installed package, not a checkout
+            pytest.skip("no checkout")
+        epoch = "1735689600"  # 2025-01-01T00:00:00Z, any fixed instant will do
+        first = self._build(tmp_path / "a", epoch)
+        second = self._build(tmp_path / "b", epoch)
+        assert first == second, "two builds of one tree differ byte for byte"
+
+    def test_a_different_epoch_gives_a_different_wheel(self, tmp_path):
+        """The guard on the test above: if the wheel ignored the variable
+        entirely the first test would pass for the wrong reason, and the release
+        would still be publishing timestamps nobody can reproduce."""
+        if not (REPO / "pyproject.toml").is_file():
+            pytest.skip("no checkout")
+        assert self._build(tmp_path / "c", "1735689600") != self._build(
+            tmp_path / "d", "1767225600"
+        )
 
 
 @pytest.mark.slow

@@ -28,7 +28,10 @@ from test_render_summary import FULL_FACTS
 import shared
 import summary
 
-PROPERTY = settings(deadline=None, max_examples=150)
+# deadline only: `derandomize` and `max_examples` come from the profile
+# conftest.py loads, so the gate and the scheduled search can differ in
+# budget without three files disagreeing about it.
+PROPERTY = settings(deadline=None)
 
 # Everything the sanitiser exists to remove, sampled directly so the generator
 # cannot fail to produce one. Each entry is a real technique rather than a

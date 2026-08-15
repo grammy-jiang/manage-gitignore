@@ -13,9 +13,43 @@ import subprocess
 import sys
 
 import pytest
+from hypothesis import settings
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "src" / "manage_gitignore" / "skill" / "scripts"
+
+# ── property-test determinism ───────────────────────────────────────────────
+# Hypothesis draws different inputs on every run unless told otherwise, so a
+# green gate means "150 random examples happened to pass", not "this property
+# holds" -- and a failure that does turn up may not reproduce on the re-run.
+# Both are the same defect this repository keeps finding elsewhere: a check
+# whose result is not a property of the thing being checked.
+#
+# So the gate is derandomized. A commit's result is then a property of the
+# commit: the same tree gives the same examples on every machine and every
+# re-run, and a failure reproduces by re-running it.
+#
+# That trade is only acceptable because the search moves rather than
+# disappears. Randomised exploration with a far larger budget belongs to a
+# scheduled job (.github/workflows/property-search.yml), where finding a new
+# counterexample is the point and a red run is news rather than a blocked
+# merge. Determinism where a result must be trusted, randomness where discovery
+# is wanted -- not one setting pretending to do both.
+#
+# max_examples lives here rather than in each test file: one authoritative home
+# for the budget, so the explore profile can actually raise it.
+settings.register_profile("gate", derandomize=True, deadline=None, max_examples=150)
+settings.register_profile(
+    "explore",
+    derandomize=False,
+    deadline=None,
+    # Overridable so the scheduled search can be dispatched with a bigger budget
+    # without editing this file. Validated here rather than trusted: an
+    # unreadable value must not quietly become a one-example run that reports
+    # success. Empty is the normal case -- a workflow input nobody filled in.
+    max_examples=int(os.environ.get("HYPOTHESIS_MAX_EXAMPLES") or 2_000),
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "gate"))
 
 # The tests drive the scripts as subprocesses, by path, exactly as SKILL.md
 # does. Mapping the old script names keeps every call site readable across the

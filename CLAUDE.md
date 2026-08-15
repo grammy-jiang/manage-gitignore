@@ -99,7 +99,45 @@ target of the installed symlink, traces back to this repository by relative
 position with no layout translation to work out. This was a real defect once;
 `test_nothing_remaps_the_skill_at_build_time` exists to stop it coming back.
 
-## Design principle
+## Design principles
+
+**Anything that can be deterministic, is.** A result you cannot reproduce is a
+result you cannot act on, and the difference usually costs nothing to remove.
+Where this repository holds the line, and what it deliberately gave up:
+
+- **Property tests are derandomised in the gate.** Hypothesis draws different
+  inputs on every run by default — measured, before the fix: three runs of one
+  property drew three different input sets. A green run then meant "150 random
+  examples happened to pass", and a counterexample might never be seen again.
+  `tests/conftest.py` registers a `gate` profile (`derandomize=True`) so a
+  commit's result is a property of the commit. The search is not lost, it
+  moves: `property-search.yml` runs the `explore` profile weekly with a free
+  seed and a budget of 2,000, where a red run is news rather than a blocked
+  merge. Determinism where a result must be trusted, randomness where discovery
+  is wanted — not one setting pretending to do both.
+- **Dev dependencies are exact, not floors.** A floor means CI installs whatever
+  released that morning, so the same commit passes today and fails tomorrow on
+  somebody else's unrelated pull request. `filterwarnings = ["error"]` makes
+  that sharper still. Exact pins are only safe while something watches them, so
+  Dependabot bumps them weekly after a cooldown, through the same gates.
+- **The build is reproducible.** `release.yml` sets `SOURCE_DATE_EPOCH` from the
+  tagged commit, so re-running the release on a tag rebuilds the same bytes and
+  "this artifact is that tag" is checkable. `TestTheBuildIsReproducible` asserts
+  the property, and its second test asserts a different epoch gives a different
+  wheel — otherwise the first would pass on a build that ignored the variable.
+- **Filesystem order never reaches a decision.** `scan_repo` sorts every
+  directory and file listing, because `os.walk` order is filesystem-dependent
+  and "which marker file explains this recommendation" must not be.
+- **No set is iterated into output.** Every set in the scripts is a membership
+  test or a comparison; where one reaches a message it is `sorted()` first.
+  Python randomises string hashing per process, so an unsorted set in a summary
+  would reorder between runs of the same input.
+
+What is deliberately *not* deterministic: `-n auto` picks a worker count from
+the machine, so the shape of a run varies even though `--dist loadfile` keeps
+outcomes stable; and `mutate.py`'s per-mutant timeout is wall-clock derived, so
+a heavily loaded machine can push a mutant into "unscored". Both fail loudly
+rather than silently — the second is why unscored leaves the denominator.
 
 **Anything a program can decide, a program decides.** The agent driving this
 skill asks the user, judges the answers, writes the commit message, and relays
