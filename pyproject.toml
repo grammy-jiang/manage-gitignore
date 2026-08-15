@@ -1,5 +1,14 @@
 [build-system]
-requires = ["hatchling"]
+# Pinned, because this is the requirement an *isolated* build resolves — and
+# `python -m build` isolates by default, so the release job fetches whatever
+# this line allows straight from PyPI. Installing hatchling into the job does
+# not reach it. Left unbounded, a hatchling release between two builds of one
+# tag would run unreviewed backend code and could produce different artifacts,
+# which is the whole claim SOURCE_DATE_EPOCH is here to make.
+#
+# tests/test_packaging.py asserts this pin equals the dev extra's: they are two
+# homes for one fact, and only a test keeps them from drifting.
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]

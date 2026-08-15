@@ -96,21 +96,32 @@ class TestThePropertyGateIsDeterministic:
     different input sets.
     """
 
-    def test_the_default_profile_derandomises(self):
+    def test_the_gate_profile_derandomises(self):
+        """The named profile, not `settings.default`.
+
+        Found in review: reading the *current* default made this fail whenever
+        the suite ran under `HYPOTHESIS_PROFILE=explore`, where being random is
+        the point -- a test that breaks on the configuration it exists to allow.
+        """
         from hypothesis import settings
 
-        assert settings.default.derandomize is True
+        assert settings.get_profile("gate").derandomize is True
 
     def test_the_same_property_draws_the_same_inputs_twice(self):
-        """The claim itself, not the setting that is supposed to cause it."""
+        """The claim itself, not the setting that is supposed to cause it.
+
+        Pinned to the gate profile for the same reason as above: under the
+        exploring profile these two runs *should* differ.
+        """
         import hashlib
 
-        from hypothesis import given
+        from hypothesis import given, settings
         from hypothesis import strategies as st
 
         def drawn() -> str:
             seen: list[str] = []
 
+            @settings(settings.get_profile("gate"))
             @given(st.text(max_size=8))
             def collect(value):
                 seen.append(value)
@@ -127,8 +138,9 @@ class TestThePropertyGateIsDeterministic:
         from hypothesis import settings
 
         explore = settings.get_profile("explore")
+        gate = settings.get_profile("gate")
         assert explore.derandomize is False
-        assert explore.max_examples > settings.default.max_examples
+        assert explore.max_examples > gate.max_examples
 
 
 def test_the_check_itself_is_looking_at_something():
