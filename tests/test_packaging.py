@@ -124,6 +124,40 @@ class TestTheSdistCarriesTheSkillToo:
         assert missing == []
 
 
+class TestTheBackendIsPinnedEverywhereItIsResolved:
+    """`python -m build` isolates by default, so the backend the release
+    actually runs comes from `[build-system] requires` and not from anything
+    installed into the job.
+
+    Found in review: pinning hatchling in the dev extra looked like it pinned
+    the release build, and did not. A hatchling release between two builds of
+    one tag could then run unreviewed backend code and produce different
+    artifacts -- exactly what SOURCE_DATE_EPOCH is there to rule out.
+
+    Two pins is two homes for one fact, so this is the test that stops them
+    drifting apart.
+    """
+
+    @staticmethod
+    def _pyproject() -> dict:
+        tomllib = pytest.importorskip("tomllib", reason="tomllib is 3.11+")
+        return tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+
+    def test_the_build_backend_is_pinned_exactly(self):
+        requires = self._pyproject()["build-system"]["requires"]
+        assert [r for r in requires if "==" not in r] == [], (
+            "an unpinned build-system requirement is resolved from PyPI at build time"
+        )
+
+    def test_both_pins_name_the_same_hatchling(self):
+        data = self._pyproject()
+        build = [r for r in data["build-system"]["requires"] if r.startswith("hatchling")]
+        dev = [
+            r for r in data["project"]["optional-dependencies"]["dev"] if r.startswith("hatchling")
+        ]
+        assert build == dev, "the isolated build and the offline build would use different backends"
+
+
 @pytest.mark.slow
 class TestTheBuildIsReproducible:
     """Two builds of one tree must produce the same bytes.
