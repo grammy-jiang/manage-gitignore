@@ -95,6 +95,21 @@ dev = [
 [project.scripts]
 manage-gitignore = "manage_gitignore.cli:main"
 
+[tool.hatch.build]
+# A working copy carries `.claude/skills/manage-gitignore` and
+# `.agents/skills/manage-gitignore`: symlinks back to src/manage_gitignore/skill,
+# so an agent run *inside this repository* uses the checkout rather than the
+# released package. They are untracked, and this is what keeps them out of a
+# build.
+#
+# `skip-excluded-dirs` is the load-bearing half, not `exclude`. Excluding the
+# paths alone still lets hatchling walk into them, follow the symlink, meet the
+# skill tree under a second path, and then omit it from the artifact entirely --
+# measured: the wheel went from 17 entries to 8, with the whole skill missing and
+# no warning. Skipping the directories outright is what stops the walk.
+exclude = [".claude", ".agents"]
+skip-excluded-dirs = true
+
 [tool.hatch.build.targets.wheel]
 # The skill lives at src/manage_gitignore/skill/ and ships as ordinary package
 # data. Deliberately no force-include: a build-time path remap would make an
