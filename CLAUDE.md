@@ -234,8 +234,8 @@ of it free.
 
 Everything above ran on the *pure* half of its subject, because that is what
 keeps a run to a minute. `--all-functions` covers the rest, and has now been run
-once against both scripts that have an impure half: **`gitwork.py` 576/742** and
-**`templates.py` 416/538**, from 559 and 405 before the gaps were pinned. Both
+once against both scripts that have an impure half: **`gitwork.py` 585/742** and
+**`templates.py` 425/538**, from 559 and 405 before the gaps were pinned. Both
 runs are harness-clean — nothing unscored.
 
 Three fixes to `mutate.py` came first, because the run could not finish:
@@ -259,19 +259,35 @@ The impure halves are where the safety properties live, and three of them were
 unchecked. `check=True` survived on all three `git push` calls — with
 `check=False` a rejected push is reported as `"pushed": true` and recorded in
 the facts file, so the agent tells the user their work is on the remote when it
-is not. Nothing looked at `GIT_TERMINAL_PROMPT=0` or `protocol.ext.allow=never`.
-And curl's `-fsS` could be deleted: without `-f` curl prints the server's error
-page as the body and exits 0, so a 404 becomes the text this tool treats as a
-template block. A test named `--proto`, `-L` and both bounds, and still missed
-it — which is the argument for asserting the whole command line rather than the
-flags somebody thought of.
+is not, and nothing had ever driven a push the remote refuses. Nothing looked at
+`GIT_TERMINAL_PROMPT=0` or `protocol.ext.allow=never`. And curl's `-fsS` could be
+deleted: without `-f` curl prints the server's error page as the body and exits
+0, so a 404 becomes the text this tool treats as a template block. A test named
+`--proto`, `-L` and both bounds, and still missed it — which is the argument for
+asserting the whole command line rather than the flags somebody thought of.
+
+Then a second pass, because "the rest are only diagnostics" is a category and
+not a reading. Going through the *behavioural* survivors one at a time found
+four more real ones — `check=True` on the two push legs the first pass had not
+covered, `"forced"` on a first push, and `"pushed"` on the `remote-moved`
+refusal — and one shape that had nothing to do with messages:
+
+**Four constants were checked only against themselves.** `SCAN_MAX_DEPTH` built
+both fixtures in its own boundary test; `REASON_MAX_LEN` was what the truncation
+tests measured the result against; both recoverable exit codes were asserted as
+`out.returncode == gi.EXIT_*`. Raise any of them and fixture and expectation move
+together. The exit codes are the worst case, because they are a caller contract —
+`SKILL.md` tells agents to branch on them rather than match message text — so a
+silent change is a breaking change with a green suite. Each is now also written
+out as a number, which is the only form that can disagree.
 
 The survivors that remain are the same shape as every earlier audit, at the
-largest scale yet: of 166 in `gitwork.py`, 121 are string literals; of 122 in
-`templates.py`, 85 are. What is left is deliberate. `main` in both files is
-argparse wiring, and a test asserting help text is a second copy of the help
-text that will drift from the first. The rest are diagnostics on paths whose
-*behaviour* is already checked.
+largest scale yet: better than four in five are string literals. What is left is
+deliberate. `main` in both files is argparse wiring, and a test asserting help
+text is a second copy of the help text that will drift from the first. The rest
+are diagnostics on paths whose *behaviour* is already checked — but note that
+this exact sentence was written once before, and reading the list rather than
+trusting it found nine more kills per script. Re-read it before believing it.
 
 Recorded as equivalent rather than chased:
 
@@ -280,6 +296,7 @@ Recorded as equivalent rather than chased:
 | `or` → `and` in `check_api_block`'s header guard | with `and`, a `# Created by` line lacking `/api/` falls through to the URL check — and any string passing *that* check contains `/api/`, since `API` ends in `/api` |
 | `FETCH_MAX_SECONDS + 10` → `- 10`, and `10 → 11` | the grace period on top of a 20s bound; no reachable input distinguishes them |
 | `65536 → 65537` in the read loop | a chunk size, not a bound: the cap is checked against the accumulated body |
+| `near[:5]` in `validate`'s substring pass | the outer `near[:5]` truncates the same list again, so the inner bound cannot reach the output |
 
 Two of the tests written for this audit passed while proving nothing, and only
 re-applying the mutation found it: one measured against `MAX_ERR_LEN` itself, so

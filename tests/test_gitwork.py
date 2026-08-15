@@ -1802,9 +1802,7 @@ class TestGapsFoundByTheAllFunctionsAudit:
         fails the way a protected branch does.
         """
         work, bare = remote_pair
-        hook = bare / "hooks" / "pre-receive"
-        hook.write_text("#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n", encoding="utf-8")
-        hook.chmod(0o755)
+        self._refuse_pushes(bare)
         write_gitignore(work)
         git(work, "add", ".gitignore")
         git(work, "commit", "-m", "something to push")
@@ -1815,6 +1813,128 @@ class TestGapsFoundByTheAllFunctionsAudit:
         if out.stdout.strip():
             assert json.loads(out.stdout).get("pushed") is not True
         assert remote_head(bare) != git(work, "rev-parse", "HEAD").stdout.strip()
+
+    @staticmethod
+    def _refuse_pushes(bare):
+        """Make a bare repo reject every push, the way a protected branch does."""
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    def test_a_rejected_first_push_is_never_reported_as_pushed(self, repo, run_script, make_bare):
+        """Survived: `check=True -> False` on the `no-upstream` push.
+
+        The same defect as the fast-forward leg, on the path a first push takes
+        -- `git push -u`, the one that runs when the branch has no upstream at
+        all, which is the most common shape of a real first run.
+        """
+        bare = make_bare("only")
+        self._refuse_pushes(bare)
+        git(repo, "remote", "add", "only", str(bare))
+        write_gitignore(repo)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-m", "first")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "push")
+
+        assert out.returncode != 0, out.stdout
+        if out.stdout.strip():
+            assert json.loads(out.stdout).get("pushed") is not True
+        landed = git(repo, "rev-parse", "--verify", "-q", "refs/remotes/only/main", check=False)
+        assert landed.returncode != 0, "a refused push must leave no tracking ref"
+
+    def test_a_first_push_reports_that_it_did_not_force(self, repo, run_script, make_bare):
+        """Survived: `"forced": False -> True` on the `no-upstream` push.
+
+        A first push to an empty remote drops nothing and cannot be a force, so
+        saying it forced is a claim that the user's history was rewritten. The
+        existing test for this leg asserts the exit code and the upstream it
+        set, and nothing about `forced`.
+        """
+        git(repo, "remote", "add", "only", str(make_bare("only")))
+        write_gitignore(repo)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-m", "first")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "push")
+
+        assert out.returncode == 0, out.stderr
+        data = json.loads(out.stdout)
+        assert data["pushed"] is True
+        assert data["forced"] is False
+
+    def test_a_rejected_force_push_is_never_reported_as_pushed(
+        self, remote_pair, clone_of, run_script, tmp_path
+    ):
+        """Survived: `check=True -> False` and `"pushed": True -> False` on the
+        force leg.
+
+        The worst place to misreport a push. A force that the remote refuses,
+        announced as `"pushed": true, "forced": true`, tells the user their
+        history rewrite landed -- so they stop worrying about the commits it
+        was going to drop, which are still there.
+        """
+        work, bare = remote_pair
+        other = clone_of(bare, tmp_path / "other")
+        (other / "t.txt").write_text("x\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "theirs")
+        git(other, "push", "-q")
+        (work / "m.txt").write_text("y\n", encoding="utf-8")
+        git(work, "add", "-A")
+        git(work, "commit", "-qm", "mine")
+        approved_sha = gw.push_plan(str(work))["upstream_sha"]
+        remote_before = remote_head(bare)
+        self._refuse_pushes(bare)
+
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(work),
+            "push",
+            "--confirm-force",
+            "--expect-remote",
+            approved_sha,
+        )
+
+        assert out.returncode != 0, out.stdout
+        if out.stdout.strip():
+            assert json.loads(out.stdout).get("pushed") is not True
+        assert remote_head(bare) == remote_before, "the refused force must not have landed"
+
+    def test_a_moved_remote_reports_it_did_not_push(
+        self, remote_pair, clone_of, run_script, tmp_path
+    ):
+        """Survived: `"pushed": False -> True` on the `remote-moved` leg.
+
+        The lease check that exists because the commits a force would drop are
+        no longer the ones the user agreed to drop. Its exit code was asserted;
+        the document saying nothing was pushed was not.
+        """
+        work, bare = remote_pair
+        other = clone_of(bare, tmp_path / "other")
+        (other / "t.txt").write_text("x\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "theirs")
+        git(other, "push", "-q")
+        (work / "m.txt").write_text("y\n", encoding="utf-8")
+        git(work, "add", "-A")
+        git(work, "commit", "-qm", "mine")
+
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(work),
+            "push",
+            "--confirm-force",
+            "--expect-remote",
+            "0" * 40,  # not the sha the plan was made against
+        )
+
+        assert out.returncode == 4
+        data = json.loads(out.stdout)
+        assert data["pushed"] is False
+        assert data["error"] == "remote-moved"
 
     @pytest.mark.parametrize(
         ("leg", "expected_error"),

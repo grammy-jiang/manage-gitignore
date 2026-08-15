@@ -318,9 +318,127 @@ class TestRecommend:
         assert "node" in self._names(self._tree(tmp_path / "at", at_limit))
         assert "node" not in self._names(self._tree(tmp_path / "past", too_deep))
 
+    def test_that_boundary_is_three_directories_deep(self, tmp_path):
+        """Survived the --all-functions audit: `SCAN_MAX_DEPTH = 3 -> 4`.
 
-# ── flagged patterns ────────────────────────────────────────────────────────
-class TestClassify:
+        The test above builds both fixtures *from* the constant, so raising it
+        moves the paths and the expectation together and nothing fails -- the
+        boundary is checked relative to itself. The depth is written out here,
+        which is the only way that test's claim can be broken.
+
+        `src/app/settings.py` is the case the number was chosen for; a fourth
+        level is where scanning a monorepo starts costing more than it finds.
+        """
+        assert "node" in self._names(self._tree(tmp_path / "three", "d/d/d/package.json"))
+        assert "node" not in self._names(self._tree(tmp_path / "four", "d/d/d/d/package.json"))
+
+    def test_a_reason_is_truncated_at_eighty_characters(self, tmp_path):
+        """Survived: `REASON_MAX_LEN = 80 -> 81`, for the same reason -- every
+        assertion about it measures against the constant."""
+        tail = "/package.json"
+        deep = ("d" * (81 - len(tail))) + tail
+        reason = gi.recommend(str(self._tree(tmp_path / "eighty", deep)))[0]["reason"]
+        assert len(reason) == 80
+        assert reason.endswith("…")
+
+
+class TestTheNumbersCallersBranchOn:
+    """Survived the --all-functions audit: every exit code, incremented.
+
+    Each is asserted elsewhere as `out.returncode == gi.EXIT_UNKNOWN_TEMPLATE`,
+    which moves with the constant and can never fail. These are not tuning
+    values -- they are the contract a caller reads instead of matching on
+    message text, and `SKILL.md` tells agents to branch on them. Changing one
+    silently is a breaking change with a green suite.
+    """
+
+    def test_the_exit_codes_are_these_numbers(self):
+        assert gi.EXIT_ERROR == 1
+        assert gi.EXIT_UNKNOWN_TEMPLATE == 3
+        assert gi.EXIT_DIRTY_GITIGNORE == 4
+
+    def test_no_two_exit_codes_collide(self):
+        """They are only useful while they are distinguishable, and 0 is success."""
+        codes = [gi.EXIT_ERROR, gi.EXIT_UNKNOWN_TEMPLATE, gi.EXIT_DIRTY_GITIGNORE]
+        assert len(set(codes)) == len(codes)
+        assert 0 not in codes
+
+
+class TestGapsFoundByTheAllFunctionsAudit:
+    """The impure half of this file, mutated for the first time (issue #46)."""
+
+    def test_a_recommendation_reaches_the_proposed_set_on_its_own(self, tmp_path, run_script):
+        """Survived: `not in` -> `in` when merging recommendations into
+        `proposed`, which drops every recommendation instead of de-duplicating.
+
+        The existing test asserts `"rust" in proposed` for a repo that already
+        had a `.gitignore` naming rust -- so the name arrived from the *previous*
+        set on the next line, and this line could stop working entirely without
+        failing anything. No prior file here, so `proposed` can only be
+        always-on plus what the scan found.
+        """
+        (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
+        out = run_script("gitignore.py", "--dir", str(tmp_path), "--recommend")
+
+        assert out.returncode == 0, out.stderr
+        data = json.loads(out.stdout)
+        assert data["previous"] == [], "the point of the fixture is that nothing carried over"
+        assert [h["name"] for h in data["recommended"]] == ["node"]
+        assert data["proposed"] == [*gi.ALWAYS_ON, "node"]
+
+    def test_at_most_five_suggestions_are_offered(self, api, capsys):
+        """Survived: `near[:5] -> near[:6]`.
+
+        Substring hits and close matches are collected separately and can total
+        more than five between them, so the cap is what stops an unknown name
+        answering with the whole catalogue. Every existing test asserts that
+        *a* suggestion appears.
+        """
+        api.set_list(["pya", "pyb", "pyc", "pyd", "pye", "pyf"])
+        with pytest.raises(SystemExit):
+            gi.validate(["py"])
+
+        line = next(x for x in capsys.readouterr().err.splitlines() if "did you mean" in x)
+        assert len(line.split("did you mean:")[1].split(",")) == 5
+
+    @pytest.mark.parametrize("region", ["block", "custom"])
+    def test_only_an_edit_inside_the_template_block_is_reported_as_one(
+        self, tmp_path, api, run_script, region
+    ):
+        """Survived: `split_regions(...)[1]` -> `[2]`, on either side of the
+        comparison.
+
+        `[1]` is the template block and `[2]` is the custom rules, so the mutant
+        asks about the wrong region. It decides which of two things the user is
+        told, and they are opposites: an edit inside the block cannot survive a
+        rebuild and must be reported, while an edit to their own rules is
+        re-applied and needs no warning. Both directions are checked, because a
+        warning that always fires is as useless as one that never does.
+        """
+        block = api_block(["git", "node"])
+        api.set_block(block)
+        root = init_repo(tmp_path / "blockedit")
+        (root / "package.json").write_text("{}", encoding="utf-8")
+        (root / ".gitignore").write_text(f"{block}\nmy-rule/\n", encoding="utf-8")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "committed with a template block")
+
+        if region == "block":
+            edited = (
+                (root / ".gitignore")
+                .read_text(encoding="utf-8")
+                .replace("### Node ###", "### Node ### (mine)")
+            )
+        else:
+            edited = (root / ".gitignore").read_text(encoding="utf-8") + "another-rule/\n"
+        (root / ".gitignore").write_text(edited, encoding="utf-8")
+
+        out = run_script("gitignore.py", "--dir", str(root), "--force", "git", "node")
+
+        assert out.returncode == 0, out.stderr
+        warned = "your edit touched the template block itself" in out.stdout
+        assert warned is (region == "block")
+
     """One precedence: always_on > recommended > carried_over > added."""
 
     def test_always_on_wins_even_when_a_rule_also_recommends_it(self):
