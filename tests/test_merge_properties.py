@@ -41,7 +41,10 @@ from conftest import api_block
 # rather than the code -- a 200ms budget on a function that takes microseconds
 # only ever fires when the machine hiccups, and a test that fails for that
 # reason teaches nobody anything.
-PROPERTY = settings(deadline=None, max_examples=150)
+# deadline only: `derandomize` and `max_examples` come from the profile
+# conftest.py loads, so the gate and the scheduled search can differ in
+# budget without three files disagreeing about it.
+PROPERTY = settings(deadline=None)
 
 # The templates conftest.py has canned bodies for. Two of them overlap on
 # `.env`, which is the interesting case for de-duplication.

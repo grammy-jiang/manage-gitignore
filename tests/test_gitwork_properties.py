@@ -27,7 +27,10 @@ import gitwork
 
 # Same reasoning as tests/test_merge_properties.py: pure functions, microseconds
 # per example, and a deadline that would only ever measure the CI runner.
-PROPERTY = settings(deadline=None, max_examples=150)
+# deadline only: `derandomize` and `max_examples` come from the profile
+# conftest.py loads, so the gate and the scheduled search can differ in
+# budget without three files disagreeing about it.
+PROPERTY = settings(deadline=None)
 
 REMOTES = st.sampled_from(["origin", "upstream", "fork", "gh"])
 URLS = st.sampled_from(

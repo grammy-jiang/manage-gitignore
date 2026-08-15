@@ -83,6 +83,54 @@ def test_no_definition_shadows_another_in_the_same_block(path: Path):
     assert clashes == []
 
 
+class TestThePropertyGateIsDeterministic:
+    """A commit's test result must be a property of the commit.
+
+    Hypothesis randomises by default, which makes a green run mean "150 random
+    examples passed on this machine at this moment". Two runs of an unchanged
+    tree then answer different questions, and a counterexample found once may
+    never be seen again -- the same defect this repository keeps finding in its
+    own checks, one level up.
+
+    Measured before the profile existed: three runs of one property drew three
+    different input sets.
+    """
+
+    def test_the_default_profile_derandomises(self):
+        from hypothesis import settings
+
+        assert settings.default.derandomize is True
+
+    def test_the_same_property_draws_the_same_inputs_twice(self):
+        """The claim itself, not the setting that is supposed to cause it."""
+        import hashlib
+
+        from hypothesis import given
+        from hypothesis import strategies as st
+
+        def drawn() -> str:
+            seen: list[str] = []
+
+            @given(st.text(max_size=8))
+            def collect(value):
+                seen.append(value)
+
+            collect()
+            return hashlib.sha256("\x00".join(seen).encode()).hexdigest()
+
+        assert drawn() == drawn()
+
+    def test_the_exploring_profile_is_still_random_and_bigger(self):
+        """The other half of the trade. If the scheduled search were derandomised
+        too, raising its budget would buy a longer run of the same examples and
+        the project would have given up finding anything new."""
+        from hypothesis import settings
+
+        explore = settings.get_profile("explore")
+        assert explore.derandomize is False
+        assert explore.max_examples > settings.default.max_examples
+
+
 def test_the_check_itself_is_looking_at_something():
     """A guard on the two above: an empty file list makes both vacuous, and a
     glob that stops matching is exactly how that would happen quietly."""
