@@ -17,6 +17,7 @@ import summary as rs
 from conftest import MODULE, script_command, script_env
 
 FULL_FACTS = {
+    "tool": "manage-gitignore",
     "scan": {
         "git_repo": True,
         "gitignore": "existing",
@@ -53,6 +54,7 @@ FULL_FACTS = {
 
 
 FULL_FACTS_WITH_REMOVAL = {
+    "tool": "manage-gitignore",
     "templates": {"total": 1, "always_on": ["git"], "removed": ["direnv"]},
 }
 
@@ -203,12 +205,24 @@ class TestCliSuccess:
     def test_no_arguments_is_a_usage_error(self):
         assert run_cli().returncode == 2
 
-    def test_an_empty_facts_object_still_renders(self, tmp_path):
+    def test_a_document_with_nothing_but_the_marker_still_renders(self, tmp_path):
+        """Every section is optional; only the marker is not."""
         path = tmp_path / "facts.json"
-        path.write_text("{}", encoding="utf-8")
+        path.write_text(json.dumps({"tool": "manage-gitignore"}), encoding="utf-8")
         out = run_cli(str(path))
         assert out.returncode == 0
         assert "manage-gitignore" in out.stdout
+
+    def test_a_document_this_tool_did_not_write_is_refused(self, tmp_path):
+        """This is the closing report of a run. Rendering somebody else's
+        document produces a confident summary of work that did not happen
+        here -- and it is `{}` that used to be accepted, so the summary was
+        empty rather than absent."""
+        path = tmp_path / "facts.json"
+        path.write_text("{}", encoding="utf-8")
+        out = run_cli(str(path))
+        assert out.returncode != 0
+        assert "not a manage-gitignore facts file" in out.stderr
 
 
 class TestColorDecision:

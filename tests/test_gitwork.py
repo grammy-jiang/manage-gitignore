@@ -21,10 +21,11 @@ from conftest import git, init_repo, remote_head
 def facts_doc(**sections) -> str:
     """A facts document as the write step would leave it.
 
-    The marker is not decoration: every command that reads a facts file refuses
-    one without it, so that a caller passing a different existing path is told
-    rather than silently merged into. Tests build documents the same way for the
-    same reason -- one that omitted it would be testing a file the tool rejects.
+    The marker is not decoration: gitwork.py's commands and summary.py both
+    refuse a document without it, so a caller passing a different existing path
+    is told rather than silently merged into. Tests build documents the same way
+    for the same reason -- one that omitted it would be testing a file the tool
+    rejects.
     """
     return json.dumps({"tool": gw.FACTS_TOOL, **sections})
 
@@ -1765,7 +1766,32 @@ class TestTheToolDecidesRatherThanTheAgent:
         out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(stranger))
 
         assert out.returncode != 0
-        assert "not this run's facts file" in out.stderr
+        assert "is not a manage-gitignore facts file" in out.stderr
+
+    def test_a_facts_file_from_another_repository_is_refused(self, repo, run_script, tmp_path):
+        """The marker says only "some run of this tool wrote this". A facts file
+        left behind by a run against a *different* repo carries it too, and
+        merging into that one produces a confident summary of work done
+        elsewhere. `write.path` is what binds a document to its target."""
+        elsewhere = tmp_path / "elsewhere.json"
+        elsewhere.write_text(
+            facts_doc(write={"path": str(tmp_path / "other-repo" / ".gitignore")}),
+            encoding="utf-8",
+        )
+
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(elsewhere))
+
+        assert out.returncode != 0
+        assert "belongs to a different run" in out.stderr
+
+    def test_the_run_that_owns_the_document_is_accepted(self, repo, run_script, tmp_path):
+        """The other half: the binding must not reject the ordinary case."""
+        mine = tmp_path / "mine.json"
+        mine.write_text(facts_doc(write={"path": str(repo / ".gitignore")}), encoding="utf-8")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(mine))
+
+        assert out.returncode == 0, out.stderr
 
 
 class TestGapsFoundByTheAllFunctionsAudit:

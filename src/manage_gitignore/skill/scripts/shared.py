@@ -337,11 +337,18 @@ class InternalFacts(TypedDict, total=False):
 
 
 # Stamped into the facts document by the run that creates it, and required by
-# every command that later reads one. The point is not authenticity -- nothing
-# here is a trust boundary -- it is catching a caller that passed a different
-# path. A facts path that does not exist already fails loudly; one that exists
-# and holds something else used to be merged into and reported as a success,
-# silently losing everything recorded so far.
+# every command that later reads one: gitwork.py's status, commit, push and
+# facts, and summary.py's renderer.
+#
+# The point is not authenticity -- nothing here is a trust boundary -- it is
+# catching a caller that passed a different path. A facts path that does not
+# exist already fails loudly; one that exists and holds something else used to
+# be merged into and reported as a success, silently losing everything recorded
+# so far.
+#
+# The marker alone says only "some run of this tool wrote this". gitwork.py
+# binds it to the run as well, by checking the target the document records
+# against the repository the command was pointed at.
 FACTS_TOOL = "manage-gitignore"
 
 

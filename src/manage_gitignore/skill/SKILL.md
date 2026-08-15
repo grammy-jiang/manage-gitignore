@@ -301,6 +301,8 @@ That output *is* the closing summary; do not hand-format a second one. Then
   it. Never approximate with a nearby template.
 - Never hand-write `.gitignore` or hand-edit the template block or custom rules.
   If the API is unreachable, say so; do not fake it.
+- Never run `git add`/`commit`/`push` yourself. `scripts/gitwork.py` is the only
+  path to a mutation, and it fails closed.
 - This skill modifies and commits **only** `.gitignore`, and within it only the
   change this run made.
 - Commit messages go through a file and `--message-file`. Never a heredoc or
