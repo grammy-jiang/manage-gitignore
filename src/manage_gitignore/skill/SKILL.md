@@ -120,8 +120,8 @@ Always pass `--force`: with no existing file it does nothing, and with one it is
 safe precisely because the tool carries the custom rules across.
 
 **Pick `<facts.json>` once, here, and pass that same path to every `--facts`
-later.** A different path is not an error — it silently loses everything recorded
-so far. Keep it outside the repo, out of the diff being reviewed.
+later**, outside the repo so it stays out of the diff being reviewed. A
+different path is refused, not silently merged into.
 
 You delete both temp files once each command returns: `rm -f "<templates.txt>"`,
 and `rm -f "<msgfile>"` after Step 4. The tools never unlink their inputs.
@@ -147,17 +147,12 @@ template that covers it, and any `Review before committing` lines — negations
 **Those flags cover the template block only, never the carried-over custom
 rules**, so their absence certifies nothing about the rest of the diff.
 
-**If it says `Carried across your uncommitted change`**, `.gitignore` already had
-an edit of the user's in it. The rebuild was based on the *committed* file, so
-the commit will be this run's work alone; their edit was re-applied on top in the
-work tree and will be put back staged or unstaged exactly as it was. Relay every
-`+ kept` / `- honoured` line, and relay a `!` line about the template block
-loudly — that part of their edit could not be carried across, because the block
-is regenerated wholesale.
+**If it says `Carried across your uncommitted change`**, read
+[references/carried-across.md](references/carried-across.md) and follow it — the
+file on disk is then deliberately not what will be committed.
 
-From here the file on disk is deliberately **not** what will be committed. Do not
-diff it by hand and do not describe it as the change; Step 4's `status` reports
-the committed version, and it is the one to show.
+Otherwise: do not diff the file by hand and do not describe it as the change.
+Step 4's `status` reports the committed version, and it is the one to show.
 
 ## Step 4 — Review, commit, push (`.gitignore` ONLY)
 
@@ -177,16 +172,13 @@ work tree holds that change too; without the facts file this would diff the work
 tree and show the user their own edit as if this run had made it.
 
 It picks the right command for the file's state and returns the real diff — show
-it. For an `untracked` file that diff is a one-line stub, so also show the file
-itself (your file-read tool, or `cat`); on a first run the Step 3 flags are otherwise
-the only review surface. If `suspicious_characters` is true, say so: the terminal
-may not be rendering what the file says.
+it. If `diff_is_stub` is true the diff is a one-line "this file is new", so show
+the file itself too (your file-read tool, or `cat`); on a first run the Step 3
+flags are otherwise the only review surface. If `suspicious_characters` is true,
+say so: the terminal may not be rendering what the file says.
 
-Two outcomes skip the rest of Step 4 — go to Step 5 with
-`--choice "not committed"`, no `--hash`, and a `--note` saying which:
-
-- `is_repo: false` → `--note "not a git repo"`
-- `changed: false` → `--note "no change: .gitignore already matched"`
+If `skip_reason` is not null, the rest of Step 4 does not apply: go to Step 5
+with `--note "<skip_reason>"` and no `--hash`.
 
 Read the diff for what *the user* should weigh — a flagged negation, a broad
 pattern, a custom rule they will be surprised to see gone.
@@ -200,10 +192,8 @@ change and not an intention:
   only the subject, so a body would be approved and never shown back. If the user
   supplies several lines, say only the first is recorded and confirm it.
 - **Say the file is already written.** *Don't commit* leaves the change on disk;
-  it does not undo it. Name the right discard for the `state` `status` reported:
-  `modified`/`staged` with history → `git checkout -- .gitignore`; `untracked`
-  (the common first run) → `rm .gitignore`; staged with no commits yet →
-  `git reset -- .gitignore && rm .gitignore`.
+  it does not undo it. Quote `status`'s `discard_command` as the way back — it
+  is computed from the file's state, so do not compose one yourself.
 - **Name where a push would go**, from the tool rather than by re-deriving it:
 
   ```bash
@@ -235,10 +225,10 @@ verified*.
 **Read `verdict`:**
 
 - `ok` — keep the returned `hash` for Step 5.
-- anything else — **do not push.** The JSON carries `remedy` (what the user can
-  run) and `record_choice` / `record_note` (what Step 5 must record). Relay the
-  remedy; **never run it yourself** — discarding a commit that exists is the
-  user's call. Do not pass the hash to Step 5.
+- anything else — **do not push.** Relay its `remedy`; **never run it yourself**
+  — discarding a commit that exists is the user's call. It has already written
+  the outcome into the facts file, so Step 5 needs nothing extra from you. Do
+  not pass the hash to Step 5.
 
 A non-zero exit with no verdict means nothing was committed and the index is as
 you found it. Report it and stop.
@@ -277,24 +267,22 @@ no push recorded.
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
-  --choice "commit + push" --hash "<hash>" --note "<why, when needed>"
+  --hash "<hash>" --note "<why, when needed>"
 ```
 
-`--choice` is the one value no repository state can supply. Record what
-*happened*, not what was asked for:
+**What happened is derived, not declared.** `commit --facts` recorded the commit,
+`push --facts` recorded the push, and a refused commit recorded its own outcome —
+so `facts` reads the answer off the document rather than being told it. There is
+no choice for you to work out, and nothing to say when the run went normally.
 
-| what happened | `--choice` | `--note` |
-| --- | --- | --- |
-| committed and pushed | `commit + push` | — |
-| committed, no push (`permits_push: false`, `pushed: false`, skipped, or a failed push) | `commit only` | the plan's `guidance`, or the reported error |
-| commit refused, or the user said *Don't commit* | `not committed` | the error, when there was one |
-| bad commit (`verdict` ≠ `ok`) | the JSON's `record_choice` | its `record_note` |
-| Step 4 item 1 shortcut | `not committed` | the note given there |
+Pass only what the tools cannot know:
 
-Omit `--hash` unless `verdict` was `ok`; it is verified, not believed. `--note`
-repeats, and appends without touching computed fields — never hand-edit the file.
-The commit and push lines are already in it: `commit --facts` and `push --facts`
-wrote them.
+- `--hash` — only when `verdict` was `ok`. It is verified, not believed.
+- `--note` — only to carry a reason: a `skip_reason` from Step 4 item 1, the
+  `guidance` from a plan that did not permit a push, or the error text from a
+  push that failed. It repeats, and appends without touching computed fields.
+
+Never hand-edit the file.
 
 ```bash
 python3 "<skill-dir>/scripts/summary.py" "<facts.json>"
@@ -313,10 +301,8 @@ That output *is* the closing summary; do not hand-format a second one. Then
   it. Never approximate with a nearby template.
 - Never hand-write `.gitignore` or hand-edit the template block or custom rules.
   If the API is unreachable, say so; do not fake it.
-- Never run `git add`/`commit`/`push` directly.
 - This skill modifies and commits **only** `.gitignore`, and within it only the
-  change this run made. If the file already carries an uncommitted edit, Step 3
-  stops; that edit is the user's to commit, stash, or discard.
+  change this run made.
 - Commit messages go through a file and `--message-file`. Never a heredoc or
   `-m "$(...)"` — some shells inject ANSI bytes into both, and those end up
   stored in the commit.

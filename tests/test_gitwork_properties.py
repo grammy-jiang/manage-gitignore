@@ -252,7 +252,7 @@ class TestRecordedPushKeepsTheWholeBranchName:
         the test that makes the explanation binding.
         """
         facts = tmp_path / "facts.json"
-        facts.write_text("{}", encoding="utf-8")
+        facts.write_text(json.dumps({"tool": gitwork.FACTS_TOOL}), encoding="utf-8")
         args = argparse.Namespace(facts=str(facts))
 
         gitwork.record_push(
