@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
 from shared import (
+    FACTS_TOOL,
     Facts,
     PushPlan,
     atomic_write_bytes,
@@ -249,10 +250,42 @@ def diff_command(repo: str, state: str, *, stat: bool = False) -> list[str]:
     return ["diff", "HEAD", *stat_flag, "--", TARGET]
 
 
+def discard_command(repo: str, state: str) -> str | None:
+    """How the user undoes this run's write, for the state the file is in.
+
+    Not a sentence for the agent to assemble. The right answer turns on whether
+    the file is tracked and whether there is any commit to check out from, and
+    both are facts this command already holds -- so an agent working it out from
+    a table in prose is a decision that can go wrong for no reason. `rm` where
+    `git checkout` was needed loses a file that was under version control.
+
+    None means there is nothing to undo.
+    """
+    if state == "clean":
+        return None
+    if state == "untracked":
+        return f"rm {TARGET}"
+    if not has_commits(repo):
+        # Tracked but nothing to restore from: unstage, then remove.
+        return f"git reset -- {TARGET} && rm {TARGET}"
+    return f"git checkout -- {TARGET}"
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     repo = args.dir
     if not is_repo(repo):
-        emit({"is_repo": False, "state": None, "diff": None})
+        emit(
+            {
+                "is_repo": False,
+                "state": None,
+                "diff": None,
+                "changed": False,
+                "discard_command": None,
+                # Why the rest of the run is skipped, in the words the summary
+                # should carry. Composed here so it cannot be paraphrased.
+                "skip_reason": "not a git repo",
+            }
+        )
         return 0
     state = file_state(repo)
     carried = ""
@@ -299,6 +332,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             "diff": diff,
             "changed": state != "clean",
             "suspicious_characters": suspicious,
+            "discard_command": discard_command(repo, state),
+            # For an untracked file the diff is `status --short`: one line saying
+            # the file is new, which is not a review surface. Said here rather
+            # than left to the agent to infer from `state`.
+            "diff_is_stub": state == "untracked",
+            "skip_reason": None if state != "clean" else "no change: .gitignore already matched",
         }
     )
     return 0
@@ -412,6 +451,16 @@ def load_facts(path: str) -> Facts:
         die(f"cannot read facts file {path}: {exc}")
     if not isinstance(facts, dict):
         die("facts file must contain a JSON object")
+    # A path that does not exist already dies above. This is the other half: a
+    # path that exists and holds something else. Merging into it and reporting
+    # success loses every number the run recorded, and the summary that follows
+    # is missing sections rather than visibly wrong -- which is the hardest kind
+    # of wrong to notice.
+    if facts.get("tool") != FACTS_TOOL:
+        die(
+            f"{path} is not this run's facts file (no {FACTS_TOOL} marker). "
+            "Pass the same --facts-out path the write step was given."
+        )
     # The file was written by these same tools, so its shape is Facts; json.load
     # simply cannot say so. Every read site still uses .get() with a default.
     return cast("Facts", facts)
@@ -429,6 +478,36 @@ def save_facts(path: str, facts: Facts) -> None:
     """Atomic: several commands update this file in turn, and a half-written one
     would fail the next step with a JSON error rather than the real cause."""
     write_json_or_die(path, dict(facts), die)
+
+
+def append_notes(facts: Facts, notes: list[str]) -> None:
+    """Add to the notes list, whatever shape it is in.
+
+    One definition because two commands write notes now, and a second copy of
+    "read it, coerce it to a list, append" is a second place for them to
+    disagree about what an existing string-valued `notes` means.
+    """
+    raw = facts.get("notes")
+    prior = list(raw) if isinstance(raw, (list, tuple)) else ([raw] if raw else [])
+    facts["notes"] = [str(n) for n in prior] + list(notes)
+
+
+def record_refusal(args: argparse.Namespace, choice: str, note: str) -> None:
+    """Write a refused commit's outcome into the facts document, if there is one.
+
+    This was already computed here and printed as `record_choice` /
+    `record_note` for the caller to hand back to `facts` in a later command.
+    Handing it back is a step that can be skipped, and when it is, the summary
+    reports a commit that the tool refused to stand behind. Writing it here
+    removes the step rather than documenting it.
+    """
+    path = getattr(args, "facts", None)
+    if path is None:
+        return
+    facts = load_facts(path)
+    facts.setdefault("commit", {})["choice"] = choice
+    append_notes(facts, [note])
+    save_facts(path, facts)
 
 
 def cmd_commit(args: argparse.Namespace) -> int:
@@ -553,6 +632,11 @@ def commit_verified(args: argparse.Namespace) -> int:
     sha = current_short_sha(repo)
     problem = scope_violation(repo, files)
     if problem:
+        note = (
+            f"commit {sha} was made but touched extra files; not recorded "
+            "— see the reported undo command"
+        )
+        record_refusal(args, "not committed", note)
         # Still JSON on stdout: the caller needs the hash to report (and undo)
         # the commit that should not have happened.
         emit(
@@ -562,13 +646,12 @@ def commit_verified(args: argparse.Namespace) -> int:
                 "only_gitignore": False,
                 "verdict": "touched-extra-files",
                 "remedy": problem,
-                # What Step 5 must record. Derived here so the doc does not carry
-                # a second copy of the same four-way mapping.
+                # Kept for a caller that passed no --facts. With one, the two
+                # fields have already been written into it: relaying them back
+                # by hand was a step that could be skipped, and the summary was
+                # wrong when it was.
                 "record_choice": "not committed",
-                "record_note": (
-                    f"commit {sha} was made but touched extra files; not recorded "
-                    "— see the reported undo command"
-                ),
+                "record_note": note,
             }
         )
         print(f"gitwork: {problem}", file=sys.stderr)
@@ -578,6 +661,11 @@ def commit_verified(args: argparse.Namespace) -> int:
         # different bytes under the same path.
         rc_oid, committed_oid, _ = git(repo, "rev-parse", f"{sha}:{TARGET}")
         if rc_oid != 0 or committed_oid != staged_oid:
+            note = (
+                f"commit {sha} recorded different content than was verified; "
+                "not recorded — see the reported undo command"
+            )
+            record_refusal(args, "not committed", note)
             emit(
                 {
                     "hash": sha,
@@ -587,10 +675,7 @@ def commit_verified(args: argparse.Namespace) -> int:
                     "verdict": "content-mismatch",
                     "remedy": f"Do NOT push; {undo_hint(repo)}.",
                     "record_choice": "not committed",
-                    "record_note": (
-                        f"commit {sha} recorded different content than was verified; "
-                        "not recorded — see the reported undo command"
-                    ),
+                    "record_note": note,
                 }
             )
             print(
@@ -954,9 +1039,16 @@ def diffstat(repo: str, commit_hash: str | None) -> str:
 def cmd_facts(args: argparse.Namespace) -> int:
     """Merge git-side facts into the JSON gitignore.py --facts-out produced.
 
-    The only thing accepted from the caller here is --choice, which records a
-    human answer no repository state can supply. Everything else is re-derived,
-    including a --hash, which is verified rather than believed.
+    Everything is re-derived, including a --hash, which is verified rather than
+    believed -- and including the choice, which used to be the caller's to work
+    out from a five-row table. It never needed to be: `commit --facts` records
+    the hash, `push --facts` records the push, and a refused commit records its
+    own choice, so what happened is already written down by the time this runs.
+    Asking the caller to restate it invited a summary that reported the
+    intention instead of the outcome -- "commit + push" over a push that failed.
+
+    --choice remains, as an override for a caller that knows better, but it is
+    no longer needed to get the common cases right.
     """
     repo = args.dir
     refuse_facts_alias(repo, args.facts)
@@ -964,12 +1056,8 @@ def cmd_facts(args: argparse.Namespace) -> int:
     if args.note:
         # Appended through the tool so the rest of the file is never rewritten by
         # hand -- a hand-merge is how computed fields get dropped.
-        raw = facts.get("notes")
-        prior = list(raw) if isinstance(raw, (list, tuple)) else ([raw] if raw else [])
-        facts["notes"] = [str(n) for n in prior] + args.note
+        append_notes(facts, args.note)
     facts.setdefault("scan", {})["git_repo"] = is_repo(repo)
-    # The choice is the user's answer, not a repository fact: record it even
-    # when there is no repo, which is exactly when it says "not committed".
     commit = facts.setdefault("commit", {})
     if args.choice:
         commit["choice"] = args.choice
@@ -998,6 +1086,18 @@ def cmd_facts(args: argparse.Namespace) -> int:
         stat = diffstat(repo, args.hash)
         if stat:
             facts.setdefault("net", {})["diffstat"] = stat.strip().splitlines()[-1].strip()
+
+    # Derived last, from what every earlier command wrote down. A commit with a
+    # push recorded beside it was pushed; a commit without one was not; no
+    # commit at all is "not committed", which is equally true of a refusal and
+    # of the user declining. Nothing here can disagree with the rest of the
+    # document, because it is computed from the rest of the document.
+    if not commit.get("choice"):
+        if not commit.get("hash"):
+            commit["choice"] = "not committed"
+        else:
+            pushed = bool((commit.get("push") or {}).get("sha"))
+            commit["choice"] = "commit + push" if pushed else "commit only"
 
     save_facts(args.facts, facts)
     emit({"facts": args.facts, "merged": True})
@@ -1065,7 +1165,7 @@ def main() -> int:
     p.add_argument(
         "--choice",
         choices=("commit + push", "commit only", "not committed"),
-        help="the user's answer -- the one fact no repo state can supply",
+        help="override the outcome derived from what the run recorded",
     )
 
     args = parser.parse_args()

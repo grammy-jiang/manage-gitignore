@@ -18,10 +18,21 @@ import gitwork as gw
 from conftest import git, init_repo, remote_head
 
 
+def facts_doc(**sections) -> str:
+    """A facts document as the write step would leave it.
+
+    The marker is not decoration: every command that reads a facts file refuses
+    one without it, so that a caller passing a different existing path is told
+    rather than silently merged into. Tests build documents the same way for the
+    same reason -- one that omitted it would be testing a file the tool rejects.
+    """
+    return json.dumps({"tool": gw.FACTS_TOOL, **sections})
+
+
 @pytest.fixture
 def facts_file(tmp_path):
     path = tmp_path / "facts.json"
-    path.write_text(json.dumps({"merge": {"esc_bytes": 0}}), encoding="utf-8")
+    path.write_text(facts_doc(merge={"esc_bytes": 0}), encoding="utf-8")
     return path
 
 
@@ -303,9 +314,7 @@ class TestCommit:
 
         write_gitignore(repo)
         digest = hashlib.sha256((repo / ".gitignore").read_bytes()).hexdigest()
-        facts_file.write_text(
-            json.dumps({"internal": {"written_sha256": digest}}), encoding="utf-8"
-        )
+        facts_file.write_text(facts_doc(internal={"written_sha256": digest}), encoding="utf-8")
         write_gitignore(repo, "node_modules/\nTAMPERED\n")
         out = run_script(
             "gitwork.py",
@@ -329,9 +338,7 @@ class TestCommit:
 
         write_gitignore(repo)
         digest = hashlib.sha256((repo / ".gitignore").read_bytes()).hexdigest()
-        facts_file.write_text(
-            json.dumps({"internal": {"written_sha256": digest}}), encoding="utf-8"
-        )
+        facts_file.write_text(facts_doc(internal={"written_sha256": digest}), encoding="utf-8")
         secret = tmp_path / "secret"
         secret.write_text("PRIVATE KEY\n", encoding="utf-8")
         (repo / ".gitignore").unlink()
@@ -356,9 +363,7 @@ class TestCommit:
 
         write_gitignore(repo)
         digest = hashlib.sha256((repo / ".gitignore").read_bytes()).hexdigest()
-        facts_file.write_text(
-            json.dumps({"internal": {"written_sha256": digest}}), encoding="utf-8"
-        )
+        facts_file.write_text(facts_doc(internal={"written_sha256": digest}), encoding="utf-8")
         (repo / ".gitignore").unlink()
         _os.mkfifo(repo / ".gitignore")
         out = run_script(
@@ -402,9 +407,7 @@ class TestCommit:
 
         write_gitignore(repo)
         digest = hashlib.sha256((repo / ".gitignore").read_bytes()).hexdigest()
-        facts_file.write_text(
-            json.dumps({"internal": {"written_sha256": digest}}), encoding="utf-8"
-        )
+        facts_file.write_text(facts_doc(internal={"written_sha256": digest}), encoding="utf-8")
         out = run_script(
             "gitwork.py",
             "--dir",
@@ -1054,7 +1057,7 @@ class TestFacts:
     ):
         """A hand-edited facts file is discouraged but must not lose data."""
         facts = tmp_path / "f.json"
-        facts.write_text(json.dumps({"notes": "single existing note"}), encoding="utf-8")
+        facts.write_text(facts_doc(notes="single existing note"), encoding="utf-8")
         run_script(
             "gitwork.py", "--dir", str(repo), "facts", "--facts", str(facts), "--note", "two"
         )
@@ -1355,7 +1358,7 @@ class TestFactsRefusesAnUnverifiedCommit:
         write_gitignore(repo, "COMPLETELY-DIFFERENT/\n")  # the worktree moved on
 
         facts = tmp_path / "f.json"
-        facts.write_text(json.dumps({"internal": {"written_sha256": "deadbeef"}}), encoding="utf-8")
+        facts.write_text(facts_doc(internal={"written_sha256": "deadbeef"}), encoding="utf-8")
         out = run_script(
             "gitwork.py", "--dir", str(repo), "facts", "--facts", str(facts), "--hash", sha
         )
@@ -1447,18 +1450,16 @@ def carried(repo, tmp_path):
     write_gitignore(repo, WITH_USER_LINE)
     facts = tmp_path / "carry.json"
     facts.write_text(
-        json.dumps(
-            {
-                "merge": {"esc_bytes": 0},
-                "internal": {
-                    "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
-                    "worktree_sha256": hashlib.sha256(WITH_USER_LINE.encode()).hexdigest(),
-                    "pending_state": "modified",
-                    "commit_text": REBUILT,
-                    "restore_worktree": WITH_USER_LINE,
-                    "restore_index": "",
-                },
-            }
+        facts_doc(
+            merge={"esc_bytes": 0},
+            internal={
+                "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
+                "worktree_sha256": hashlib.sha256(WITH_USER_LINE.encode()).hexdigest(),
+                "pending_state": "modified",
+                "commit_text": REBUILT,
+                "restore_worktree": WITH_USER_LINE,
+                "restore_index": "",
+            },
         ),
         encoding="utf-8",
     )
@@ -1515,18 +1516,16 @@ class TestCommitCarriesTheUsersChange:
         write_gitignore(repo, worktree_version)
         facts = tmp_path / "c.json"
         facts.write_text(
-            json.dumps(
-                {
-                    "merge": {"esc_bytes": 0},
-                    "internal": {
-                        "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
-                        "worktree_sha256": hashlib.sha256(worktree_version.encode()).hexdigest(),
-                        "pending_state": "staged",
-                        "commit_text": REBUILT,
-                        "restore_worktree": worktree_version,
-                        "restore_index": staged_version,
-                    },
-                }
+            facts_doc(
+                merge={"esc_bytes": 0},
+                internal={
+                    "written_sha256": hashlib.sha256(REBUILT.encode()).hexdigest(),
+                    "worktree_sha256": hashlib.sha256(worktree_version.encode()).hexdigest(),
+                    "pending_state": "staged",
+                    "commit_text": REBUILT,
+                    "restore_worktree": worktree_version,
+                    "restore_index": staged_version,
+                },
             ),
             encoding="utf-8",
         )
@@ -1616,6 +1615,157 @@ class TestScopeViolationSaysWhatWentWrong:
 
     def test_a_commit_touching_only_the_target_is_not_a_violation(self, repo):
         assert gw.scope_violation(str(repo), [".gitignore"]) is None
+
+
+class TestTheToolDecidesRatherThanTheAgent:
+    """Facts the skill used to make an agent work out from a table in prose.
+
+    Every one of these was a decision the scripts already held the inputs for,
+    written up as instructions instead: which discard command suits the file's
+    state, whether the run should stop, and what actually happened by the end.
+    Prose is the expensive place to keep a decision -- it costs tokens on every
+    run and can be applied wrongly -- so each moved into the JSON.
+    """
+
+    def test_an_untracked_file_is_discarded_by_removing_it(self, repo, run_script):
+        write_gitignore(repo)
+        data = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert data["state"] == "untracked"
+        assert data["discard_command"] == "rm .gitignore"
+
+    def test_a_tracked_file_with_history_is_discarded_by_checking_it_out(self, repo, run_script):
+        write_gitignore(repo, "first\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        write_gitignore(repo, "second\n")
+        data = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert data["state"] == "modified"
+        assert data["discard_command"] == "git checkout -- .gitignore"
+
+    def test_a_staged_file_with_no_commits_needs_both_halves(self, empty_repo, run_script):
+        """The case that makes this worth computing: `git checkout` has nothing
+        to restore from on an unborn HEAD, and `rm` alone leaves it staged."""
+        write_gitignore(empty_repo)
+        git(empty_repo, "add", ".gitignore")
+        data = json.loads(run_script("gitwork.py", "--dir", str(empty_repo), "status").stdout)
+        assert data["discard_command"] == "git reset -- .gitignore && rm .gitignore"
+
+    def test_there_is_nothing_to_discard_when_nothing_changed(self, repo, run_script):
+        write_gitignore(repo)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        data = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert data["state"] == "clean"
+        assert data["discard_command"] is None
+
+    def test_the_reason_to_stop_is_given_in_the_words_to_record(self, repo, plain_dir, run_script):
+        """Both shortcuts, in the phrasing the summary should carry -- so the
+        agent relays a sentence instead of choosing one."""
+        outside = json.loads(run_script("gitwork.py", "--dir", str(plain_dir), "status").stdout)
+        assert outside["is_repo"] is False
+        assert outside["skip_reason"] == "not a git repo"
+
+        write_gitignore(repo)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        clean = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert clean["changed"] is False
+        assert clean["skip_reason"] == "no change: .gitignore already matched"
+
+    def test_a_run_that_can_continue_says_so_by_saying_nothing(self, repo, run_script):
+        write_gitignore(repo)
+        data = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert data["skip_reason"] is None
+        assert data["diff_is_stub"] is True, "an untracked diff is a one-line stub"
+
+    def test_a_tracked_diff_is_not_a_stub(self, repo, run_script):
+        write_gitignore(repo, "first\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        write_gitignore(repo, "second\n")
+        data = json.loads(run_script("gitwork.py", "--dir", str(repo), "status").stdout)
+        assert data["diff_is_stub"] is False
+
+    @pytest.mark.parametrize(
+        ("commit_block", "expected"),
+        [
+            ({}, "not committed"),
+            ({"hash": "abc1234"}, "commit only"),
+            ({"hash": "abc1234", "push": {"sha": "abc1234"}}, "commit + push"),
+        ],
+    )
+    def test_what_happened_is_read_off_the_document(
+        self, repo, run_script, tmp_path, commit_block, expected
+    ):
+        """No `--choice`. The earlier commands wrote the commit and the push, so
+        the answer is already in the file -- and a summary that says
+        "commit + push" over a push that failed is what being told it invited.
+        """
+        facts = tmp_path / "f.json"
+        facts.write_text(facts_doc(commit=dict(commit_block)), encoding="utf-8")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(facts))
+
+        assert out.returncode == 0, out.stderr
+        assert json.loads(facts.read_text())["commit"]["choice"] == expected
+
+    def test_an_explicit_choice_still_wins(self, repo, run_script, tmp_path):
+        """The override stays: a caller that knows better is not overruled."""
+        facts = tmp_path / "f.json"
+        facts.write_text(facts_doc(commit={"hash": "abc1234"}), encoding="utf-8")
+        run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "facts",
+            "--facts",
+            str(facts),
+            "--choice",
+            "not committed",
+        )
+        assert json.loads(facts.read_text())["commit"]["choice"] == "not committed"
+
+    def test_a_refused_commit_records_itself(self, repo, run_script, tmp_path):
+        """It computed `record_choice` and `record_note`, then printed them for
+        the agent to hand back to a later command. Handing them back is a step
+        that can be skipped, and when it is, the summary reports a commit the
+        tool refused to stand behind."""
+        facts = tmp_path / "f.json"
+        facts.write_text(facts_doc(merge={"esc_bytes": 0}), encoding="utf-8")
+        write_gitignore(repo)
+        (repo / "other.txt").write_text("not ours\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\ngit add other.txt\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "commit",
+            "--message-file",
+            str(msg_file(tmp_path)),
+            "--facts",
+            str(facts),
+        )
+
+        assert out.returncode == gw.EXIT_BAD_COMMIT
+        recorded = json.loads(facts.read_text())
+        assert recorded["commit"]["choice"] == "not committed"
+        assert any("touched extra files" in note for note in recorded["notes"])
+
+    def test_a_facts_file_from_somewhere_else_is_refused(self, repo, run_script, tmp_path):
+        """A path that does not exist already fails. This is the other half: one
+        that exists and holds something else was merged into and reported as a
+        success, losing every number the run had recorded."""
+        stranger = tmp_path / "stranger.json"
+        stranger.write_text('{"notes": ["from another tool"]}', encoding="utf-8")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "facts", "--facts", str(stranger))
+
+        assert out.returncode != 0
+        assert "not this run's facts file" in out.stderr
 
 
 class TestGapsFoundByTheAllFunctionsAudit:

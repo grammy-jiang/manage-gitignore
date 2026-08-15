@@ -75,6 +75,7 @@ from typing import NoReturn, TypedDict, cast
 
 from gitwork import file_state, is_repo, version_at
 from shared import (
+    FACTS_TOOL,
     Facts,
     RecommendedTemplate,
     RecommendReport,
@@ -906,6 +907,7 @@ def cmd_write(args: argparse.Namespace, target: str) -> None:
     if args.facts_out is not None:
         groups = classify(want, {h["name"]: h["reason"] for h in recommended}, prev_templates)
         facts: Facts = {
+            "tool": FACTS_TOOL,
             "scan": {
                 "gitignore": "existing" if existed else "none",
                 "prev_templates_count": len(prev_templates),

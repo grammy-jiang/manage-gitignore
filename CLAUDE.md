@@ -47,7 +47,7 @@ checked-out tree, at the version the config pins.
 | `src/manage_gitignore/skill/scripts/gitwork.py` | git: status/diff, commit, push planning, push, facts |
 | `src/manage_gitignore/skill/scripts/summary.py` | the end-of-run summary format |
 | `src/manage_gitignore/skill/scripts/shared.py` | one sanitiser, one no-follow reader, one JSON contract |
-| `src/manage_gitignore/skill/references/` | on-demand detail (force-push procedure, question splitting, worked example) |
+| `src/manage_gitignore/skill/references/` | on-demand detail (force-push procedure, question splitting, carry-across, worked example) |
 | `src/manage_gitignore/cli.py` | the installer: `install` / `uninstall`. Nothing else |
 | `src/manage_gitignore/agents.py` | which agents exist, how to spot one, where each reads skills |
 | `tests/` | pytest suite |
@@ -148,6 +148,34 @@ where a wrong answer is an exit code rather than a plausible sentence.
 So when a step needs a new fact: return it from a script as a field in the JSON
 that step already reads. Do not add a paragraph to `SKILL.md` telling the agent
 to work it out. `SKILL.md` went from 538 to 275 lines by applying this once.
+
+**`SKILL.md` is loaded on every run, so prose is the expensive place to keep a
+decision** — it costs tokens each time and can be applied wrongly, where a field
+costs nothing and cannot. A second pass found four still written as instructions,
+and each became JSON: `discard_command` (which undo suits the file's state — `rm`
+where `git checkout` was needed destroys a tracked file), `skip_reason` (why the
+run stops, in the words the summary should carry), `diff_is_stub`, and the
+outcome itself. That last one was a five-row table the agent applied from memory
+of what it had just done; `facts` derives it from what `commit --facts` and
+`push --facts` wrote down, so a push that failed can no longer be summarised as
+`commit + push`. A refused commit records its own choice and note rather than
+printing them for the agent to hand back.
+
+Two rules follow, and they are the ones to apply to the next change:
+
+- **If the answer is already in the JSON, do not restate it in prose.** A
+  sentence telling the agent how to combine two fields is a function that belongs
+  in the script.
+- **Detail needed by a minority of runs belongs in `references/`.** Those are read
+  on demand, so a paragraph there is free to every run that never needs it —
+  which is why the carry-across explanation is `references/carried-across.md` and
+  `SKILL.md` keeps only the trigger and the pointer.
+
+The facts document is stamped `"tool": "manage-gitignore"`, and every command that
+reads one refuses a document without it. A path that does not exist already failed
+loudly; one that exists and holds something else was merged into and reported as
+success, so the summary came out missing sections rather than visibly wrong. That
+was a warning addressed to the agent; it is enforced now, which is the same move.
 
 ## Commands
 

@@ -336,7 +336,17 @@ class InternalFacts(TypedDict, total=False):
     restore_index: str  # "" when nothing was staged, i.e. nothing to restore
 
 
+# Stamped into the facts document by the run that creates it, and required by
+# every command that later reads one. The point is not authenticity -- nothing
+# here is a trust boundary -- it is catching a caller that passed a different
+# path. A facts path that does not exist already fails loudly; one that exists
+# and holds something else used to be merged into and reported as a success,
+# silently losing everything recorded so far.
+FACTS_TOOL = "manage-gitignore"
+
+
 class Facts(TypedDict, total=False):
+    tool: str
     scan: ScanFacts
     templates: TemplatesFacts
     merge: MergeFacts
