@@ -13,6 +13,7 @@ nowhere in the checkout, so a traceback could not be traced back.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -122,6 +123,55 @@ class TestTheSdistCarriesTheSkillToo:
         root = roots.pop()
         missing = [f for f in SKILL_FILES if f"{root}/src/{f}" not in names]
         assert missing == []
+
+
+@pytest.mark.slow
+class TestALocalSkillLinkCannotEmptyTheWheel:
+    """A working copy carries `.claude/skills/manage-gitignore` and
+    `.agents/skills/manage-gitignore` -- symlinks back to the skill directory, so
+    an agent run inside this repository uses the checkout rather than the
+    released package.
+
+    Hatchling follows them, meets the skill tree under a second path, and drops
+    it from the artifact *entirely*: measured, the wheel went from 17 entries to
+    8 with every skill file gone. There is no warning and the build succeeds, so
+    the published package would install and link fine and simply have no skill
+    in it.
+
+    `skip-excluded-dirs` in pyproject.toml is what stops the walk. `exclude`
+    alone does not -- that was tried first and changed nothing.
+    """
+
+    @pytest.mark.parametrize("link_dir", [".claude/skills", ".agents/skills"])
+    def test_the_skill_survives_a_symlink_pointing_back_at_it(self, tmp_path, link_dir):
+        if not (REPO / "pyproject.toml").is_file():  # installed package, not a checkout
+            pytest.skip("no checkout")
+        work = tmp_path / "checkout"
+        # symlinks=True, or copytree resolves the very links under test into
+        # real copies and the build never sees a link at all.
+        shutil.copytree(REPO, work, symlinks=True, ignore=shutil.ignore_patterns(".git", "dist"))
+        links = work / link_dir
+        links.mkdir(parents=True, exist_ok=True)
+        target = links / "manage-gitignore"
+        if target.is_symlink() or target.exists():
+            target.unlink()
+        target.symlink_to(Path("../..") / "src" / "manage_gitignore" / "skill")
+        assert (target / "SKILL.md").is_file(), "the fixture's own link must resolve"
+
+        out = tmp_path / "dist"
+        subprocess.run(
+            [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(out), str(work)],
+            capture_output=True,
+            check=True,
+        )
+        made = list(out.glob("*.whl"))
+        assert len(made) == 1, f"expected one wheel, got {made}"
+        names = set(zipfile.ZipFile(made[0]).namelist())
+
+        assert [f for f in SKILL_FILES if f not in names] == [], (
+            f"a {link_dir} link emptied the wheel -- see skip-excluded-dirs in pyproject.toml"
+        )
+        assert not [n for n in names if ".claude" in n or ".agents" in n]
 
 
 class TestTheBackendIsPinnedEverywhereItIsResolved:
