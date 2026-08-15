@@ -291,7 +291,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     carried = ""
     if getattr(args, "facts", None) is not None:
         refuse_facts_alias(repo, args.facts)
-        carried = (load_facts(args.facts).get("internal") or {}).get("commit_text") or ""
+        carried = (load_facts(args.facts, repo).get("internal") or {}).get("commit_text") or ""
     if carried:
         # The work tree holds this run's rebuild plus the user's own uncommitted
         # edit. Diffing it would show the user their own change as if this run
@@ -441,7 +441,12 @@ def scope_violation(repo: str, files: list[str]) -> str | None:
     return f"commit touches {files} -- expected only {TARGET}. Do NOT push; {undo_hint(repo)}."
 
 
-def load_facts(path: str) -> Facts:
+def load_facts(path: str, repo: str | None = None) -> Facts:
+    """Read a facts document, refusing one this run has no business in.
+
+    `repo` is optional only because two callers reach here from a plain
+    Namespace that carries no --dir; every command path supplies it.
+    """
     # Through the same no-follow reader as .gitignore: a facts path is caller-
     # supplied, so it can be a symlink or a FIFO just as easily.
     raw = read_bytes_or_die(path, die)
@@ -458,12 +463,38 @@ def load_facts(path: str) -> Facts:
     # of wrong to notice.
     if facts.get("tool") != FACTS_TOOL:
         die(
-            f"{path} is not this run's facts file (no {FACTS_TOOL} marker). "
+            f"{path} is not a {FACTS_TOOL} facts file (no marker). "
             "Pass the same --facts-out path the write step was given."
         )
     # The file was written by these same tools, so its shape is Facts; json.load
     # simply cannot say so. Every read site still uses .get() with a default.
-    return cast("Facts", facts)
+    document = cast("Facts", facts)
+    if repo is not None:
+        require_facts_for(repo, path, document)
+    return document
+
+
+def require_facts_for(repo: str, path: str, facts: Facts) -> None:
+    """Refuse a facts document that belongs to a different repository.
+
+    The marker alone says "some run of this tool wrote this", which is not the
+    question: a facts file left behind by a run against *another* repo carries
+    that marker too, and merging into it produces a confident summary of work
+    done somewhere else. `write.path` is the absolute target that run wrote, so
+    comparing it against the target of this one is the binding.
+
+    Absent means an older or partial document -- the marker check has already
+    established provenance, and there is nothing here to disagree with.
+    """
+    recorded = (facts.get("write") or {}).get("path")
+    if not recorded:
+        return
+    here = os.path.abspath(os.path.join(repo, TARGET))
+    if os.path.abspath(str(recorded)) != here:
+        die(
+            f"{path} belongs to a different run: it records {clean(str(recorded))}, "
+            f"but this command is working on {here}."
+        )
 
 
 def refuse_facts_alias(repo: str, facts_path: str | None) -> None:
@@ -504,7 +535,7 @@ def record_refusal(args: argparse.Namespace, choice: str, note: str) -> None:
     path = getattr(args, "facts", None)
     if path is None:
         return
-    facts = load_facts(path)
+    facts = load_facts(path, getattr(args, "dir", None))
     facts.setdefault("commit", {})["choice"] = choice
     append_notes(facts, [note])
     save_facts(path, facts)
@@ -529,7 +560,9 @@ def cmd_commit(args: argparse.Namespace) -> int:
     # .gitignore itself would have this function write the file it is meant to
     # be committing.
     refuse_facts_alias(repo, args.facts)
-    internal = (load_facts(args.facts).get("internal") or {}) if args.facts is not None else {}
+    internal = (
+        (load_facts(args.facts, repo).get("internal") or {}) if args.facts is not None else {}
+    )
     carried = internal.get("commit_text") or ""
     if not carried:
         return commit_verified(args)
@@ -585,7 +618,7 @@ def commit_verified(args: argparse.Namespace) -> int:
     # path match is not enough: anything could have rewritten .gitignore, or
     # replaced it with a symlink, between the write and here.
     if args.facts is not None:
-        expected = (load_facts(args.facts).get("internal") or {}).get("written_sha256")
+        expected = (load_facts(args.facts, repo).get("internal") or {}).get("written_sha256")
         if expected:
             actual = hashlib.sha256(read_bytes_or_die(os.path.join(repo, TARGET), die)).hexdigest()
             # A window remains between this check and `git add` below: another
@@ -702,7 +735,7 @@ def commit_verified(args: argparse.Namespace) -> int:
     # Recorded here, at the moment the numbers are true. Nothing downstream has
     # to re-observe a working tree that has since moved, or reword a raw count.
     if args.facts:
-        facts = load_facts(args.facts)
+        facts = load_facts(args.facts, repo)
         commit = facts.setdefault("commit", {})
         commit.update({"hash": sha, "subject": subject, "scope": commit_scope()})
         if phrase:
@@ -878,7 +911,7 @@ def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
     """
     if not args.facts:
         return
-    facts = load_facts(args.facts)
+    facts = load_facts(args.facts, getattr(args, "dir", None))
     ref = plan.get("merge_ref") or plan.get("branch") or ""
     # removeprefix, not rsplit: "refs/heads/feature/foo" is the branch
     # "feature/foo", and splitting on the last slash would call it "foo".
@@ -1052,7 +1085,7 @@ def cmd_facts(args: argparse.Namespace) -> int:
     """
     repo = args.dir
     refuse_facts_alias(repo, args.facts)
-    facts = load_facts(args.facts)
+    facts = load_facts(args.facts, repo)
     if args.note:
         # Appended through the tool so the rest of the file is never rewritten by
         # hand -- a hand-merge is how computed fields get dropped.

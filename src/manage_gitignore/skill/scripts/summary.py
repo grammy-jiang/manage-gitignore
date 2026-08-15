@@ -56,6 +56,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NoReturn
 
 from shared import (  # one sanitiser, shared by every tool in this skill
+    FACTS_TOOL,
     Facts,
     clean,
     read_bytes_or_die,
@@ -385,6 +386,11 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    # The same gate gitwork.py applies, and for the same reason: this is the
+    # closing report of a run, so rendering somebody else's document produces a
+    # confident summary of work that did not happen here.
+    if facts.get("tool") != FACTS_TOOL:
+        _die(f"{args.facts} is not a {FACTS_TOOL} facts file (no marker).")
 
     print(render(facts, Pal(use_color(args.color))))
 
