@@ -439,6 +439,9 @@ class TestGapsFoundByTheAllFunctionsAudit:
         warned = "your edit touched the template block itself" in out.stdout
         assert warned is (region == "block")
 
+
+# ── flagged patterns ────────────────────────────────────────────────────────
+class TestClassify:
     """One precedence: always_on > recommended > carried_over > added."""
 
     def test_always_on_wins_even_when_a_rule_also_recommends_it(self):
