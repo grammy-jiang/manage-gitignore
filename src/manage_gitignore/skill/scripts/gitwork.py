@@ -968,10 +968,16 @@ def cmd_push(args: argparse.Namespace) -> int:
 
     if action == "fast-forward":
         # Validated before the record, not inline in the git() call. These values
-        # come from the repository's own config, so `safe_token` can refuse one --
-        # a remote literally named `-evil` -- and it would die with `attempted`
-        # already on disk, reporting a push that failed when git never ran.
-        # `attempted` has to keep meaning "git ran and did not come back".
+        # come from the repository's own config, so either guard can refuse one,
+        # and refusing after the record would leave `attempted` on disk for a
+        # push git never ran -- reported as a push that failed. `attempted` has
+        # to keep meaning "git ran and did not come back".
+        #
+        # The reachable case is `branch.<name>.merge` set TWICE: git's own ref
+        # resolution uses the first value, so `@{u}` still resolves and the plan
+        # is a fast-forward, while `git config --get` -- what push_plan calls --
+        # returns the last. A dash-prefixed *remote* cannot get here; git will
+        # not resolve `@{u}` through one, and the no-upstream leg filters them.
         remote_arg = safe_token(str(plan["remote"]), "remote")
         merge_arg = safe_merge_ref(plan["merge_ref"])
         # Recorded before git runs, not only after -- see record_push.
