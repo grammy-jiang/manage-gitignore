@@ -967,17 +967,18 @@ def cmd_push(args: argparse.Namespace) -> int:
         return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
 
     if action == "fast-forward":
+        # Validated before the record, not inline in the git() call. These values
+        # come from the repository's own config, so `safe_token` can refuse one --
+        # a remote literally named `-evil` -- and it would die with `attempted`
+        # already on disk, reporting a push that failed when git never ran.
+        # `attempted` has to keep meaning "git ran and did not come back".
+        remote_arg = safe_token(str(plan["remote"]), "remote")
+        merge_arg = safe_merge_ref(plan["merge_ref"])
         # Recorded before git runs, not only after -- see record_push.
         record_push(args, plan, status="attempted")
         # Explicit refspec: under push.default=matching a bare `git push` would
         # push every matching branch, not just this one.
-        git(
-            repo,
-            "push",
-            safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
-            check=True,
-        )
+        git(repo, "push", remote_arg, f"HEAD:{merge_arg}", check=True)
         sha = current_short_sha(repo)
         record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": False})
@@ -1020,15 +1021,11 @@ def cmd_push(args: argparse.Namespace) -> int:
         # Annotated: a dict display is checked against PushPlan in place, but
         # binding it to a bare name first widens it to dict[str, object].
         chosen: PushPlan = {**plan, "remote": remote}
+        # Validated before the record, as on the fast-forward leg above.
+        remote_arg = safe_token(remote, "remote")
+        branch_arg = safe_token(str(plan["branch"]), "branch")
         record_push(args, chosen, status="attempted")
-        git(
-            repo,
-            "push",
-            "-u",
-            safe_token(remote, "remote"),
-            safe_token(str(plan["branch"]), "branch"),
-            check=True,
-        )
+        git(repo, "push", "-u", remote_arg, branch_arg, check=True)
         sha = current_short_sha(repo)
         record_push(args, chosen, status="pushed", sha=sha)
         emit({**plan, "remote": remote, "pushed": True, "forced": False})
@@ -1087,15 +1084,12 @@ def cmd_push(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_NEEDS_FORCE
+        # Validated before the record, as on the two legs above.
+        merge_arg = safe_merge_ref(plan["merge_ref"])
+        lease_arg = f"--force-with-lease={merge_arg}:{safe_ref(args.expect_remote)}"
+        remote_arg = safe_token(str(plan["remote"]), "remote")
         record_push(args, plan, status="attempted")
-        git(
-            repo,
-            "push",
-            f"--force-with-lease={safe_merge_ref(plan['merge_ref'])}:{safe_ref(args.expect_remote)}",
-            safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
-            check=True,
-        )
+        git(repo, "push", lease_arg, remote_arg, f"HEAD:{merge_arg}", check=True)
         sha = current_short_sha(repo)
         record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": True})

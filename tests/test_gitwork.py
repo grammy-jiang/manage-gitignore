@@ -1049,6 +1049,56 @@ class TestAPushThatDidNotHappenIsStillRecorded:
         assert "several remotes" in push["reason"]
         assert "remote" not in push
 
+    def test_an_option_like_ref_is_refused_before_anything_is_recorded(
+        self, remote_pair, run_script, facts_file
+    ):
+        """Defect this pins, raised in review of #57: `safe_merge_ref` and
+        `safe_token` were evaluated as arguments *inside* the `git(...)` call, so
+        they ran after `record_push(status="attempted")` was already on disk. A
+        refused value therefore left `attempted` behind and the summary reported
+        a push that failed when git had never run. Measured, before the fix:
+
+            {"status": "attempted", "remote": "origin", "branch": "--"}
+
+        `attempted` has one meaning -- git ran and did not come back -- and a
+        value refused before git is reached is not it.
+
+        The vector is `branch.<name>.merge` set **twice**. That is what makes it
+        reachable at all: simply replacing the value breaks `@{u}`, so the plan
+        falls to the no-upstream leg and the guard is never reached. With two
+        values, git's own ref resolution uses the first -- so `@{u}` still
+        resolves and the plan is a fast-forward -- while `git config --get`,
+        which is what `push_plan` calls, returns the last. The two disagree, and
+        the second one is the one that reaches argv.
+
+        `remote` cannot reach the same guard: git will not resolve `@{u}`
+        through a remote whose name begins with a dash, and the no-upstream leg
+        filters those out. One guard, several callers, and this is the reachable
+        one.
+        """
+        work, _ = remote_pair
+        config = work / ".git" / "config"
+        # Written into the file rather than through `git config`, which parses an
+        # option-like value as one of its own flags. A crafted config is how such
+        # a value arrives in a checkout in the first place.
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "\tmerge = refs/heads/main\n",
+                "\tmerge = refs/heads/main\n\tmerge = --upload-pack=/bin/sh\n",
+            ),
+            encoding="utf-8",
+        )
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0
+        assert "looks like an option" in out.stderr
+        recorded = json.loads(facts_file.read_text()).get("commit", {}).get("push")
+        assert recorded is None, f"nothing may be recorded before the guard, got {recorded}"
+
     def test_a_facts_file_from_another_repo_stops_the_push_before_it_happens(
         self, remote_pair, run_script, tmp_path
     ):
