@@ -318,8 +318,11 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # the outcome overwriting the intent, with nothing left to say a push
         # had ever been wanted.
         requested = clean(facts.get("requested_action", ""))
-        diverged = bool(requested) and requested != choice
-        rows = [("requested", requested)] if diverged else []
+        # Not `diverged`: this file's neighbours use that word for a branch that
+        # needs a force-push, and reusing it for "the ask and the outcome
+        # disagree" reads as the other concept.
+        requested_differs = bool(requested) and requested != choice
+        rows = [("requested", requested)] if requested_differs else []
         rows.append(("choice", choice))
         if commit.get("hash"):
             subj = clean(commit.get("subject", ""))
@@ -333,7 +336,14 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # Only meaningful once something was committed: "not pushed" under
         # choice "not committed" reads as a failure rather than a non-event --
         # unless a push was asked for, and then its absence is the news.
-        if choice != "not committed" or diverged:
+        #
+        # Gated on the ask itself, not on `requested_differs`: a "commit only"
+        # run whose commit was refused also has an ask that differs from its
+        # outcome, and reporting "not pushed" there invents a push nobody
+        # wanted. There is only something to say about a push when one was asked
+        # for.
+        wanted_push = requested == "commit + push"
+        if choice != "not committed" or wanted_push:
             push = commit.get("push") or {}
             if push.get("sha"):
                 where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"

@@ -447,6 +447,24 @@ class TestRequestedActionAndOutcome:
         assert "requested" not in out
         assert render(FULL_FACTS) == out
 
+    def test_a_refused_commit_only_run_invents_no_push(self):
+        """Defect this pins: the push row was gated on the ask *differing* from
+        the outcome, and "commit only" refused differs too -- so a run where no
+        push was ever wanted reported `push  not pushed — see NOTES`.
+
+        The ask is what decides whether there is anything to say about a push.
+        """
+        out = render(
+            {
+                "requested_action": "commit only",
+                "commit": {"choice": "not committed"},
+                "notes": ["commit refused: .gitignore changed after it was verified"],
+            }
+        )
+        assert "requested  commit only" in out
+        assert "choice     not committed" in out
+        assert "push" not in out
+
     def test_a_push_asked_for_and_never_reached_is_still_shown(self):
         """The commit itself was refused, so the outcome is "not committed" --
         which on its own would hide that a push had been wanted at all."""
