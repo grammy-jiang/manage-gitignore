@@ -947,7 +947,326 @@ class TestPush:
         push = json.loads(facts_file.read_text())["commit"]["push"]
         assert push["remote"] == "origin"
         assert push["branch"] == "main"
+        assert push["status"] == "pushed"
         assert push["sha"] == git(work, "rev-parse", "--short", "HEAD").stdout.strip()
+
+
+class TestAPushThatDidNotHappenIsStillRecorded:
+    """Defect this pins: issue #55, the half that is not about ChatGPT.
+
+    `record_push` ran only after a successful push, so every other outcome left
+    the facts document silent -- and `facts` then derived "commit only" from a
+    document that said nothing about a push. A user who asked for
+    **Commit + push** and whose push was rejected was shown a summary in which
+    no push had ever been wanted. There was no way to tell that from the run.
+
+    One test per leg, because each returns from a different place in `cmd_push`
+    and only the one that was instrumented would have been fixed by accident.
+    """
+
+    @staticmethod
+    def _refuse_pushes(bare):
+        """Make a bare repo reject every push, the way a protected branch does."""
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    def test_a_push_the_remote_rejects_is_recorded_as_attempted(
+        self, remote_pair, run_script, facts_file
+    ):
+        """The exact shape issue #55 reported: the commit lands, the push does
+        not, and git dies inside `check=True` -- so the record has to exist
+        before the push runs or it never exists at all."""
+        work, bare = remote_pair
+        self._refuse_pushes(bare)
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "something to push")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0, out.stdout
+        push = json.loads(facts_file.read_text())["commit"]["push"]
+        assert push["status"] == "attempted"
+        assert "sha" not in push, "a rejected push must never leave a sha behind"
+        assert remote_head(bare) != git(work, "rev-parse", "HEAD").stdout.strip()
+
+    def test_a_first_push_the_remote_rejects_is_recorded_as_attempted(
+        self, repo, run_script, make_bare, facts_file
+    ):
+        """The `no-upstream` leg -- `git push -u`, what a first run does."""
+        bare = make_bare("only")
+        self._refuse_pushes(bare)
+        git(repo, "remote", "add", "only", str(bare))
+        write_gitignore(repo)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "first")
+
+        out = run_script("gitwork.py", "--dir", str(repo), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0, out.stdout
+        push = json.loads(facts_file.read_text())["commit"]["push"]
+        assert push["status"] == "attempted"
+        assert push["remote"] == "only"
+        assert "sha" not in push
+
+    def test_a_diverged_branch_records_why_it_did_not_push(
+        self, remote_pair, clone_of, run_script, tmp_path, facts_file
+    ):
+        """A refusal by the plan, not by the remote: the reason is the tool's own
+        words, so the summary never has to be told what happened in free text."""
+        work, bare = remote_pair
+        other = clone_of(bare, tmp_path / "other")
+        (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "theirs")
+        git(other, "push", "-q", "origin", "main")
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode == 4, out.stderr
+        push = json.loads(facts_file.read_text())["commit"]["push"]
+        assert push["status"] == "not attempted"
+        assert "diverged" in push["reason"]
+        assert "sha" not in push
+
+    def test_an_ambiguous_remote_records_that_nothing_was_attempted(
+        self, repo, run_script, make_bare, facts_file
+    ):
+        """The one refusal where no remote is settled, so the record carries no
+        `remote` -- the old shape indexed `plan["remote"]` unconditionally."""
+        for name in ("alpha", "beta"):
+            git(repo, "remote", "add", name, str(make_bare(name)))
+
+        out = run_script("gitwork.py", "--dir", str(repo), "push", "--facts", str(facts_file))
+
+        assert out.returncode == 5, out.stderr
+        push = json.loads(facts_file.read_text())["commit"]["push"]
+        assert push["status"] == "not attempted"
+        assert "several remotes" in push["reason"]
+        assert "remote" not in push
+
+    def test_an_option_like_ref_is_refused_before_anything_is_recorded(
+        self, remote_pair, run_script, facts_file
+    ):
+        """Defect this pins, raised in review of #57: `safe_merge_ref` and
+        `safe_token` were evaluated as arguments *inside* the `git(...)` call, so
+        they ran after `record_push(status="attempted")` was already on disk. A
+        refused value therefore left `attempted` behind and the summary reported
+        a push that failed when git had never run. Measured, before the fix:
+
+            {"status": "attempted", "remote": "origin", "branch": "--"}
+
+        `attempted` has one meaning -- git ran and did not come back -- and a
+        value refused before git is reached is not it.
+
+        The vector is `branch.<name>.merge` set **twice**. That is what makes it
+        reachable at all: simply replacing the value breaks `@{u}`, so the plan
+        falls to the no-upstream leg and the guard is never reached. With two
+        values, git's own ref resolution uses the first -- so `@{u}` still
+        resolves and the plan is a fast-forward -- while `git config --get`,
+        which is what `push_plan` calls, returns the last. The two disagree, and
+        the second one is the one that reaches argv.
+
+        `remote` cannot reach the same guard: git will not resolve `@{u}`
+        through a remote whose name begins with a dash, and the no-upstream leg
+        filters those out. One guard, several callers, and this is the reachable
+        one.
+        """
+        work, _ = remote_pair
+        config = work / ".git" / "config"
+        # Written into the file rather than through `git config`, which parses an
+        # option-like value as one of its own flags. A crafted config is how such
+        # a value arrives in a checkout in the first place.
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "\tmerge = refs/heads/main\n",
+                "\tmerge = refs/heads/main\n\tmerge = --upload-pack=/bin/sh\n",
+            ),
+            encoding="utf-8",
+        )
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0
+        assert "looks like an option" in out.stderr
+        recorded = json.loads(facts_file.read_text())["commit"]["push"]
+        # `not attempted`, and specifically not `attempted`: git never ran. The
+        # record exists at all because every other non-zero exit from `push`
+        # leaves one, and SKILL.md tells the agent so -- a path that left
+        # nothing would be reported as a push the remote rejected.
+        assert recorded["status"] == "not attempted"
+        assert "looks like an option" in recorded["reason"]
+
+    def test_a_preflight_refusal_bounds_what_it_records(self, remote_pair, run_script, facts_file):
+        """The refused value is repo-controlled and unbounded, and it lands in a
+        facts file and a summary. Bounded like git's own stderr, and measured
+        against the number rather than against `MAX_ERR_LEN` itself -- an
+        expectation derived from the constant moves with it and cannot fail."""
+        work, _ = remote_pair
+        config = work / ".git" / "config"
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "\tmerge = refs/heads/main\n",
+                f"\tmerge = refs/heads/main\n\tmerge = --{'x' * 2000}\n",
+            ),
+            encoding="utf-8",
+        )
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0
+        reason = json.loads(facts_file.read_text())["commit"]["push"]["reason"]
+        assert reason.endswith("…(truncated)")
+        assert len(reason) < 500
+
+    def test_a_second_push_does_not_erase_the_one_that_landed(
+        self, remote_pair, run_script, facts_file
+    ):
+        """Defect this pins, raised in review of #57: running `push` again after
+        it succeeded recomputes the plan as `stop-up-to-date` and the refusal
+        record overwrote the successful one. `facts` then derived
+        `commit only`, so the summary said the work was not pushed while the
+        remote had it -- the same lie this branch exists to prevent, pointing
+        the other way.
+
+        A retry is not hypothetical: a first invocation can push and then lose
+        its output to a dropped connection, and nothing stops the agent running
+        it again.
+        """
+        work, bare = remote_pair
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "chore: refresh .gitignore")
+
+        first = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+        assert first.returncode == 0, first.stderr
+        landed = json.loads(facts_file.read_text())["commit"]["push"]
+        assert landed["status"] == "pushed"
+
+        second = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert second.returncode == 0, second.stderr  # stop-up-to-date is a success
+        assert json.loads(second.stdout)["action"] == "stop-up-to-date"
+        assert json.loads(facts_file.read_text())["commit"]["push"] == landed
+        assert remote_head(bare) == git(work, "rev-parse", "HEAD").stdout.strip()
+
+    def test_a_retry_after_someone_else_advanced_the_branch_keeps_the_record(
+        self, remote_pair, clone_of, run_script, tmp_path, facts_file
+    ):
+        """The same defect through a different plan, raised in review of #57
+        after the first fix guarded only `stop-up-to-date`.
+
+        Our push lands; another actor then pushes a descendant; a retry is now
+        `stop-behind-only`. The commit is still in the remote's history, so
+        recording "not attempted" over the success would be just as wrong.
+
+        Which is why the guard is on the *status* rather than on a list of
+        actions -- every action left off such a list is this bug again, and
+        `diverged` after a force elsewhere would have been the next one.
+        """
+        work, bare = remote_pair
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "chore: refresh .gitignore")
+        assert (
+            run_script(
+                "gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file)
+            ).returncode
+            == 0
+        )
+        landed = json.loads(facts_file.read_text())["commit"]["push"]
+        ours = git(work, "rev-parse", "HEAD").stdout.strip()
+
+        other = clone_of(bare, tmp_path / "other")
+        (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "theirs")
+        git(other, "push", "-q", "origin", "main")
+
+        retry = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert json.loads(retry.stdout)["action"] == "stop-behind-only"
+        assert json.loads(facts_file.read_text())["commit"]["push"] == landed
+        # And the commit really is still published, which is what makes the
+        # preserved record true rather than merely convenient.
+        assert git(other, "merge-base", "--is-ancestor", ours, "origin/main").returncode == 0
+
+    def test_a_facts_file_from_another_repo_stops_the_push_before_it_happens(
+        self, remote_pair, run_script, tmp_path
+    ):
+        """Survived: `getattr(args, "dir", None)` -> `getattr(args, "", None)`.
+
+        `load_facts` only refuses a document belonging to a different repository
+        when it is told which repository this is; without the name it skips the
+        check. Nothing had ever driven `push --facts` at a foreign facts file, so
+        emptying that string disabled the guard with the suite green.
+
+        Recording before the push is what makes this worth pinning rather than
+        merely correct: the refusal now happens *before* `git push` runs, so a
+        mismatched facts file cannot be discovered only after the remote already
+        has the commit.
+        """
+        work, bare = remote_pair
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        facts = tmp_path / "foreign.json"
+        facts.write_text(facts_doc(write={"path": str(elsewhere / ".gitignore")}), encoding="utf-8")
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+        before = remote_head(bare)
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts))
+
+        assert out.returncode != 0
+        assert "belongs to a different run" in out.stderr
+        assert remote_head(bare) == before, "it must refuse before pushing, not after"
+
+    def test_a_requested_push_that_failed_is_not_summarised_as_commit_only(
+        self, remote_pair, run_script, facts_file
+    ):
+        """End to end, through `facts` -- the sentence issue #55 objected to.
+
+        The outcome is still "commit only", which is true. What changed is that
+        the document now also says a push was asked for, so the two can be shown
+        together instead of the outcome silently replacing the intent.
+        """
+        work, bare = remote_pair
+        self._refuse_pushes(bare)
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "chore: refresh .gitignore")
+        head = git(work, "rev-parse", "--short", "HEAD").stdout.strip()
+        run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(work),
+            "facts",
+            "--facts",
+            str(facts_file),
+            "--requested-action",
+            "commit + push",
+            "--hash",
+            head,
+        )
+
+        assert out.returncode == 0, out.stderr
+        facts = json.loads(facts_file.read_text())
+        assert facts["requested_action"] == "commit + push"
+        assert facts["commit"]["choice"] == "commit only"
+        assert facts["commit"]["push"]["status"] == "attempted"
 
 
 # ── facts ───────────────────────────────────────────────────────────────────
@@ -968,6 +1287,41 @@ class TestFacts:
         facts = json.loads(facts_file.read_text())
         assert facts["commit"]["choice"] == "not committed"
         assert facts["scan"]["git_repo"] is False
+
+    def test_the_requested_action_is_kept_apart_from_the_outcome(
+        self, repo, run_script, facts_file
+    ):
+        """Both are recorded, and neither overwrites the other. A run that asked
+        for a push and committed nothing must still say a push was asked for."""
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "facts",
+            "--facts",
+            str(facts_file),
+            "--requested-action",
+            "commit + push",
+        )
+        assert out.returncode == 0, out.stderr
+        facts = json.loads(facts_file.read_text())
+        assert facts["requested_action"] == "commit + push"
+        assert facts["commit"]["choice"] == "not committed"
+
+    def test_an_unknown_requested_action_is_refused(self, repo, run_script, facts_file):
+        """It is a closed set, like --choice. A free-form value would reach the
+        summary as a row nobody can act on."""
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "facts",
+            "--facts",
+            str(facts_file),
+            "--requested-action",
+            "pushed it already",
+        )
+        assert out.returncode != 0
 
     def test_records_the_choice_and_repo_flag(self, repo, run_script, facts_file):
         out = run_script(
