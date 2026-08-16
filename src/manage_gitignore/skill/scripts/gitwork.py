@@ -30,7 +30,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NoReturn, cast
 
 from shared import (
@@ -345,14 +345,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ── commit ──────────────────────────────────────────────────────────────────
-def safe_token(value: str, what: str) -> str:
+def safe_token(value: str, what: str, on_refusal: Callable[[str], NoReturn] = die) -> str:
     """Reject a remote/branch git would read as an option.
 
     These come from repository config, which a checked-out repo can set: a
     remote literally named "--upload-pack=..." would otherwise reach `git push`
     as a flag.
+
+    `on_refusal` exists so the push path can write down what it refused before
+    stopping. Defaulting to `die` keeps every other caller unchanged.
     """
-    return refuse_option_like(value, what, die)
+    return refuse_option_like(value, what, on_refusal)
 
 
 def safe_ref(ref: str) -> str:
@@ -393,16 +396,18 @@ def remote_push_url(repo: str, name: str) -> str:
     return url
 
 
-def safe_merge_ref(ref: str) -> str:
+def safe_merge_ref(ref: str, on_refusal: Callable[[str], NoReturn] = die) -> str:
     """A branch ref from repo config, shape-checked before it builds a refspec.
 
     merge_ref is interpolated into `HEAD:<ref>` and into a --force-with-lease
     argument. A ':' or a leading '+' there would change what the push means, and
     the value comes from branch.<name>.merge, which a checked-out repo controls.
+
+    `on_refusal` as in safe_token: the push path records before it stops.
     """
-    refuse_option_like(ref, "upstream ref", die)
+    refuse_option_like(ref, "upstream ref", on_refusal)
     if not re.fullmatch(r"refs/heads/[^:\s+][^:\s]*", ref):
-        die(f"refusing upstream ref of unexpected shape: {ref!r}")
+        on_refusal(f"refusing upstream ref of unexpected shape: {ref!r}")
     return ref
 
 
@@ -949,6 +954,19 @@ def record_push(
     save_facts(args.facts, facts)
 
 
+def recorded_push_sha(args: argparse.Namespace) -> str:
+    """The sha of a push already written into this run's facts, if there is one.
+
+    Only a landed push produces a sha, so this is the question "did an earlier
+    invocation of `push` in this run succeed" -- which is not the same as what
+    the plan says now.
+    """
+    if not args.facts:
+        return ""
+    facts = load_facts(args.facts, getattr(args, "dir", None))
+    return str(((facts.get("commit") or {}).get("push") or {}).get("sha") or "")
+
+
 def cmd_push(args: argparse.Namespace) -> int:
     """Execute exactly the action push-plan permits -- nothing else.
 
@@ -960,8 +978,31 @@ def cmd_push(args: argparse.Namespace) -> int:
     plan = describe(push_plan(repo))
     action = plan["action"]
 
+    def refuse_before_push(message: str) -> NoReturn:
+        """Write down a refusal the argument guards made, then stop.
+
+        Those guards run before git, so nothing was attempted -- but every other
+        non-zero exit from here leaves a record saying which of the two outcomes
+        it was, and SKILL.md tells the agent so. Without this, a preflight
+        refusal is the one path that leaves nothing behind, and it would be
+        reported as a push the remote rejected.
+        """
+        reason = clean(message)
+        if len(reason) > MAX_ERR_LEN:  # as git's own stderr is bounded
+            reason = reason[:MAX_ERR_LEN] + " …(truncated)"
+        record_push(args, plan, status="not attempted", reason=reason)
+        die(message)
+
     if action.startswith("stop-"):
-        record_push(args, plan, status="not attempted", reason=str(plan.get("guidance") or action))
+        # A retry after a push that already landed: `stop-up-to-date` means the
+        # remote has HEAD, so a successful record from the earlier invocation is
+        # still true. Overwriting it would turn a push that happened into "not
+        # pushed" -- the same lie this file exists to prevent, pointing the
+        # other way. Nothing new to record, so record nothing.
+        if not (action == "stop-up-to-date" and recorded_push_sha(args)):
+            record_push(
+                args, plan, status="not attempted", reason=str(plan.get("guidance") or action)
+            )
         emit({**plan, "pushed": False})
         print(f"gitwork: not pushing ({action})", file=sys.stderr)
         return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
@@ -978,8 +1019,8 @@ def cmd_push(args: argparse.Namespace) -> int:
         # is a fast-forward, while `git config --get` -- what push_plan calls --
         # returns the last. A dash-prefixed *remote* cannot get here; git will
         # not resolve `@{u}` through one, and the no-upstream leg filters them.
-        remote_arg = safe_token(str(plan["remote"]), "remote")
-        merge_arg = safe_merge_ref(plan["merge_ref"])
+        remote_arg = safe_token(str(plan["remote"]), "remote", refuse_before_push)
+        merge_arg = safe_merge_ref(plan["merge_ref"], refuse_before_push)
         # Recorded before git runs, not only after -- see record_push.
         record_push(args, plan, status="attempted")
         # Explicit refspec: under push.default=matching a bare `git push` would
@@ -1028,8 +1069,8 @@ def cmd_push(args: argparse.Namespace) -> int:
         # binding it to a bare name first widens it to dict[str, object].
         chosen: PushPlan = {**plan, "remote": remote}
         # Validated before the record, as on the fast-forward leg above.
-        remote_arg = safe_token(remote, "remote")
-        branch_arg = safe_token(str(plan["branch"]), "branch")
+        remote_arg = safe_token(remote, "remote", refuse_before_push)
+        branch_arg = safe_token(str(plan["branch"]), "branch", refuse_before_push)
         record_push(args, chosen, status="attempted")
         git(repo, "push", "-u", remote_arg, branch_arg, check=True)
         sha = current_short_sha(repo)
@@ -1091,9 +1132,9 @@ def cmd_push(args: argparse.Namespace) -> int:
             )
             return EXIT_NEEDS_FORCE
         # Validated before the record, as on the two legs above.
-        merge_arg = safe_merge_ref(plan["merge_ref"])
+        merge_arg = safe_merge_ref(plan["merge_ref"], refuse_before_push)
         lease_arg = f"--force-with-lease={merge_arg}:{safe_ref(args.expect_remote)}"
-        remote_arg = safe_token(str(plan["remote"]), "remote")
+        remote_arg = safe_token(str(plan["remote"]), "remote", refuse_before_push)
         record_push(args, plan, status="attempted")
         git(repo, "push", lease_arg, remote_arg, f"HEAD:{merge_arg}", check=True)
         sha = current_short_sha(repo)

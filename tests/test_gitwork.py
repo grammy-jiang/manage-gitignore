@@ -1096,8 +1096,69 @@ class TestAPushThatDidNotHappenIsStillRecorded:
 
         assert out.returncode != 0
         assert "looks like an option" in out.stderr
-        recorded = json.loads(facts_file.read_text()).get("commit", {}).get("push")
-        assert recorded is None, f"nothing may be recorded before the guard, got {recorded}"
+        recorded = json.loads(facts_file.read_text())["commit"]["push"]
+        # `not attempted`, and specifically not `attempted`: git never ran. The
+        # record exists at all because every other non-zero exit from `push`
+        # leaves one, and SKILL.md tells the agent so -- a path that left
+        # nothing would be reported as a push the remote rejected.
+        assert recorded["status"] == "not attempted"
+        assert "looks like an option" in recorded["reason"]
+
+    def test_a_preflight_refusal_bounds_what_it_records(self, remote_pair, run_script, facts_file):
+        """The refused value is repo-controlled and unbounded, and it lands in a
+        facts file and a summary. Bounded like git's own stderr, and measured
+        against the number rather than against `MAX_ERR_LEN` itself -- an
+        expectation derived from the constant moves with it and cannot fail."""
+        work, _ = remote_pair
+        config = work / ".git" / "config"
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "\tmerge = refs/heads/main\n",
+                f"\tmerge = refs/heads/main\n\tmerge = --{'x' * 2000}\n",
+            ),
+            encoding="utf-8",
+        )
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert out.returncode != 0
+        reason = json.loads(facts_file.read_text())["commit"]["push"]["reason"]
+        assert reason.endswith("…(truncated)")
+        assert len(reason) < 500
+
+    def test_a_second_push_does_not_erase_the_one_that_landed(
+        self, remote_pair, run_script, facts_file
+    ):
+        """Defect this pins, raised in review of #57: running `push` again after
+        it succeeded recomputes the plan as `stop-up-to-date` and the refusal
+        record overwrote the successful one. `facts` then derived
+        `commit only`, so the summary said the work was not pushed while the
+        remote had it -- the same lie this branch exists to prevent, pointing
+        the other way.
+
+        A retry is not hypothetical: a first invocation can push and then lose
+        its output to a dropped connection, and nothing stops the agent running
+        it again.
+        """
+        work, bare = remote_pair
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "chore: refresh .gitignore")
+
+        first = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+        assert first.returncode == 0, first.stderr
+        landed = json.loads(facts_file.read_text())["commit"]["push"]
+        assert landed["status"] == "pushed"
+
+        second = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert second.returncode == 0, second.stderr  # stop-up-to-date is a success
+        assert json.loads(second.stdout)["action"] == "stop-up-to-date"
+        assert json.loads(facts_file.read_text())["commit"]["push"] == landed
+        assert remote_head(bare) == git(work, "rev-parse", "HEAD").stdout.strip()
 
     def test_a_facts_file_from_another_repo_stops_the_push_before_it_happens(
         self, remote_pair, run_script, tmp_path

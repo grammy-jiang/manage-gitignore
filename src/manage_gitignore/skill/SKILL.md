@@ -259,12 +259,11 @@ A `no-upstream` plan whose `remote` is `null` (several remotes, no `origin`)
 needs one more question: show each candidate **with its URL** from `remote_urls`,
 then pass `--remote`.
 
-**A push that did not land appears two ways**, and they are not the same thing.
-JSON with `pushed: false` means the plan refused and git never ran. A non-zero
-exit with no JSON means git ran and failed. Report either and go to Step 5 —
-`push --facts` has already recorded which it was, `not attempted` with the
-reason or `attempted`, so there is nothing for you to work out. Carry git's
-error text in `--note` when there is one.
+**A push that did not land appears two ways** — JSON with `pushed: false`, or a
+non-zero exit with no JSON. Report either and go to Step 5. Do not read the
+outcome off which one you got: `push --facts` has already recorded it, as
+`not attempted` with the reason when nothing reached git, or `attempted` when
+git ran and failed. Carry git's error text in `--note` when there is one.
 
 ## Step 5 — Summary
 
