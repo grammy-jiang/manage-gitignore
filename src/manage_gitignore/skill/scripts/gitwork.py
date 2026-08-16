@@ -1233,14 +1233,27 @@ def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> 
             f"the blob the connector stored ({clean(args.blob_sha)[:12]}) is not the "
             f"content this run verified ({clean(plan.get('blob_sha'))[:12]})"
         )
+    # Shape-checked before the prefix comparison, exactly as `--expect-head` is.
+    # `startswith` accepts an abbreviated sha on purpose -- a connector may report
+    # one -- but without a lower bound it also accepts a single character, and one
+    # hex digit matches the real parent once in sixteen times by accident and
+    # every time on purpose. That turns the check that detects a moved branch
+    # into one that detects almost nothing.
+    if not SHA_PATTERN.fullmatch(args.parent):
+        return f"the commit's parent is not a sha: {clean(args.parent)!r}"
     parent = clean(plan.get("expected_parent") or "")
-    if not args.parent or not parent.startswith(args.parent):
+    if not parent.startswith(args.parent):
         return (
             f"the commit's parent ({clean(args.parent)[:12]}) is not the head this "
             f"run was based on ({parent[:12]}); the branch moved before the write"
         )
     changed = sorted(args.changed_path or [])
     if changed != [TARGET]:
+        # The list's repr, deliberately: it escapes control characters and the
+        # invisible Cf codepoints, so a hostile path cannot forge a row here even
+        # though this reason reaches stderr uncleaned. Do not "simplify" this to
+        # a join -- that would print the bytes. Pinned by
+        # test_a_hostile_changed_path_cannot_forge_a_refusal_message.
         return f"the commit changed {changed} -- expected only {[TARGET]}"
     # Against the plan, not merely against the pattern. A syntactically valid
     # `owner/name` says nothing about *which* project was written to, and an

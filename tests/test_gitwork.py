@@ -1342,6 +1342,34 @@ class TestConnectorTransport:
         assert plan["branch"] == "main"
         assert plan["subject"] == self.SUBJECT
 
+    def test_a_hostile_changed_path_cannot_forge_a_refusal_message(self, published, run_script):
+        """The other half of the refusal-message question, raised in review.
+
+        `--changed-path` values are the agent's and reach the reason through a
+        list's repr rather than through `clean`. That is safe -- repr escapes
+        control characters and the invisible Cf codepoints alike -- but it is
+        safe by a property of repr that the code does not otherwise state, so a
+        later "simplify this to a join" would reopen it silently. This is what
+        makes the comment there binding.
+        """
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+
+        out = self._record(
+            run_script,
+            repo,
+            facts,
+            changed=[".gitignore", "evil\x1b[31m\nforged row‮​"],
+        )
+
+        assert out.returncode == 7
+        for stream in (out.stderr, out.stdout):
+            assert "\x1b" not in stream
+            assert "‮" not in stream
+            assert "​" not in stream
+        reason = json.loads(facts.read_text())["commit"]["push"]["reason"]
+        assert "\x1b" not in reason and "‮" not in reason
+
     def test_a_tampered_plan_cannot_forge_a_refusal_message(self, published, run_script):
         """The plan is read back off a facts file on disk, so it is caller-
         supplied too. Its values reach stderr, which is exactly the path on
@@ -1430,6 +1458,11 @@ class TestConnectorTransport:
             ({"--blob-sha": "0" * 40}, "is not the content this run verified"),
             ({"--parent": "1" * 40}, "the branch moved before the write"),
             ({"--commit-sha": "not-a-sha"}, "is not a sha"),
+            ({"--parent": "not-a-sha"}, "parent is not a sha"),
+            # One hex digit matched the real parent by prefix, so the check that
+            # detects a moved branch accepted almost anything -- once in sixteen
+            # times by accident, every time on purpose.
+            ({"--parent": "e"}, "parent is not a sha"),
             # A syntactically valid owner/name that is simply the wrong project.
             # This is the case a pattern check alone waves through, and a fork is
             # where it is most reachable: the parent commit is the same one.
