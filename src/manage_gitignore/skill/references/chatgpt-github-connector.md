@@ -21,10 +21,15 @@ diverged from the branch you just wrote to.
 3. Check that the returned permissions include push.
 
 If the connector is missing, unselected, disconnected, or unauthorised, or if
-push permission is absent: say so, ask the user to install/select/connect
-`@GitHub`, and **stop there**. Do not fall back to shell git — in ChatGPT it has
-no credentials, and the run would end with a local commit the user did not ask
-for and a push that could never work.
+push permission is absent, then **Commit + push is unavailable**. Say so, and
+say what would restore it: install/select/connect `@GitHub` with push rights.
+Never fall back to shell git — in ChatGPT it has no credentials, so the push
+could not work, and the run would end with a local commit nobody asked for.
+
+Offer the other two choices as normal. Neither touches GitHub, so neither is
+the boundary being protected: **Commit only** is a local commit that needs no
+credentials, and **Don't commit** leaves the file on disk. Withholding them
+would refuse work the connector was never needed for.
 
 ## Which choices this path covers
 
@@ -43,8 +48,13 @@ through the connector first. Then:
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" connector-plan \
-  --facts "<facts.json>" --expect-head "<branch head>" --branch "<branch>"
+  --facts "<facts.json>" --expect-head "<branch head>" \
+  --repository "<owner/name>" --branch "<branch>" --message-file "<msgfile>"
 ```
+
+`--repository`, `--branch` and `--message-file` are what the user approved, and
+they are recorded so the write can be checked against them rather than against
+whatever comes back. The message file is the same one Step 4 already writes.
 
 It fails, and the run stops, if `.gitignore` is not the file this run verified,
 or if the local checkout is not at that branch head. The second is not a
@@ -73,20 +83,23 @@ overwritten. `connector-record` checks the result either way.
 
 ## Recording it
 
-Read the new commit back through the connector — its parent, and the paths it
-changed — then:
+Read the new commit back through the connector — its parent, its subject, and
+the paths it changed — then:
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" connector-record \
   --facts "<facts.json>" --blob-sha "<blob the connector stored>" \
   --parent "<the commit's parent>" --changed-path "<each path it changed>" \
   --commit-sha "<new commit>" --repository "<owner/name>" \
-  --branch "<branch>" --commit-url "<canonical URL>"
+  --branch "<branch>" --subject "<the commit's subject>" \
+  --commit-url "<canonical URL>"
 ```
 
-Pass `--changed-path` once per path the commit actually changed, whatever they
-are. Do not filter the list down to `.gitignore` — that check is the point of
-passing it, and a list you have already trimmed cannot fail it.
+Every value here is what GitHub says, read back after the write — not what you
+sent. Pass `--changed-path` once per path the commit actually changed, whatever
+they are, and `--subject` as GitHub reports it. Do not filter the list down to
+`.gitignore` or retype the message from your own draft: comparing them is the
+point of passing them, and a value you have already corrected cannot fail.
 
 - **exit 0** — verified. The facts file now holds the commit and the push.
 - **exit 7** — the write is not the one that was approved. The reason says which

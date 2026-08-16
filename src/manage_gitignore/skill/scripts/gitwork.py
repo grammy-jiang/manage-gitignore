@@ -1174,6 +1174,16 @@ def cmd_connector_plan(args: argparse.Namespace) -> int:
             "based on a different .gitignore than the one being replaced"
         )
 
+    if not REPOSITORY_PATTERN.fullmatch(args.repository):
+        die(f"--repository is not owner/name: {clean(args.repository)!r}")
+    # Same file the local transport commits from, read the same way -- so the
+    # message the user approved is bound to the write on both paths rather than
+    # only on the one that happens to run git.
+    message = read_bytes_or_die(args.message_file, die).decode("utf-8", "replace")
+    subject = clean(message.splitlines()[0]) if message.strip() else ""
+    if not subject:
+        die(f"message file is empty: {args.message_file}")
+
     content = publication_bytes(repo, facts)
     carried = (facts.get("internal") or {}).get("commit_text")
     if carried:
@@ -1187,7 +1197,9 @@ def cmd_connector_plan(args: argparse.Namespace) -> int:
         "path": TARGET,
         "blob_sha": blob,
         "expected_parent": head,
+        "repository": args.repository,
         "branch": args.branch,
+        "subject": subject,
         "content_sha256": hashlib.sha256(content).hexdigest(),
         "content_base64": base64.b64encode(content).decode("ascii"),
     }
@@ -1208,15 +1220,20 @@ def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> 
 
     One function returning one reason, so every caller refuses on the same set
     and the summary carries the tool's words rather than the agent's.
+
+    Both sides go through `clean`, not just the agent's. The plan is read back
+    off a facts file on disk, so it is caller-supplied too -- and this reason is
+    printed straight to stderr as well as stored, exactly the path on which
+    git's own stderr is neutralised before anybody sees it.
     """
     if not SHA_PATTERN.fullmatch(args.commit_sha):
         return f"the commit sha is not a sha: {clean(args.commit_sha)!r}"
     if args.blob_sha != plan.get("blob_sha"):
         return (
             f"the blob the connector stored ({clean(args.blob_sha)[:12]}) is not the "
-            f"content this run verified ({str(plan.get('blob_sha'))[:12]})"
+            f"content this run verified ({clean(plan.get('blob_sha'))[:12]})"
         )
-    parent = str(plan.get("expected_parent") or "")
+    parent = clean(plan.get("expected_parent") or "")
     if not args.parent or not parent.startswith(args.parent):
         return (
             f"the commit's parent ({clean(args.parent)[:12]}) is not the head this "
@@ -1225,12 +1242,29 @@ def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> 
     changed = sorted(args.changed_path or [])
     if changed != [TARGET]:
         return f"the commit changed {changed} -- expected only {[TARGET]}"
-    if not REPOSITORY_PATTERN.fullmatch(args.repository):
-        return f"the repository is not owner/name: {clean(args.repository)!r}"
+    # Against the plan, not merely against the pattern. A syntactically valid
+    # `owner/name` says nothing about *which* project was written to, and an
+    # agent with access to more than one can land the commit in the wrong place
+    # -- most easily in a fork, where the parent this already checked is the
+    # same commit. The repository the user approved is the only answer.
+    if args.repository != plan.get("repository"):
+        return (
+            f"the write landed in {clean(args.repository)!r}, not the approved "
+            f"repository {clean(plan.get('repository'))!r}"
+        )
     if args.branch != plan.get("branch"):
         return (
             f"the write landed on {clean(args.branch)!r}, not the approved branch "
-            f"{str(plan.get('branch'))!r}"
+            f"{clean(plan.get('branch'))!r}"
+        )
+    # The local path binds the message by committing from the file itself. Here
+    # the agent writes the commit, so the only binding available is comparing
+    # what came back against what was approved -- without it a stale or redrafted
+    # subject passes every other check.
+    if clean(args.subject) != clean(plan.get("subject")):
+        return (
+            f"the commit's subject ({clean(args.subject)!r}) is not the approved "
+            f"message ({clean(plan.get('subject'))!r})"
         )
     if args.commit_url:
         # Refused rather than trimmed: a URL carrying credentials is evidence the
@@ -1453,7 +1487,11 @@ def main() -> int:
         metavar="SHA",
         help="the branch head the connector reports; must equal local HEAD",
     )
+    p.add_argument("--repository", required=True, help="owner/name the write will land in")
     p.add_argument("--branch", required=True, help="the branch the write will land on")
+    p.add_argument(
+        "--message-file", required=True, help="the approved commit message; its first line binds"
+    )
 
     p = subcommand("connector-record", help="record a connector write, if it is the approved one")
     p.add_argument("--facts", required=True)
@@ -1469,6 +1507,7 @@ def main() -> int:
     p.add_argument("--commit-sha", required=True, help="the sha the connector created")
     p.add_argument("--repository", required=True, help="owner/name, as the connector reports it")
     p.add_argument("--branch", required=True, help="the branch the write landed on")
+    p.add_argument("--subject", required=True, help="the commit's subject, read back from GitHub")
     p.add_argument("--commit-url", help="canonical commit URL; refused if it carries credentials")
 
     p = subcommand("facts", help="merge git facts into a facts JSON file")

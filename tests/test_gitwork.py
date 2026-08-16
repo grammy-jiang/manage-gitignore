@@ -1199,12 +1199,20 @@ class TestConnectorTransport:
     def _head(repo):
         return git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    def _plan(self, run_script, repo, facts, head=None, branch="main"):
+    REPOSITORY = "grammy-jiang/verify-compatibility"
+    SUBJECT = "chore: refresh .gitignore"
+
+    def _plan(self, run_script, repo, facts, head=None, branch="main", repository=None, msg=None):
+        if msg is None:
+            msg = repo.parent / "msg.txt"
+            msg.write_text(self.SUBJECT + "\n", encoding="utf-8")
         return run_script(
             "gitwork.py", "--dir", str(repo), "connector-plan",
             "--facts", str(facts),
             "--expect-head", head or self._head(repo),
+            "--repository", repository or self.REPOSITORY,
             "--branch", branch,
+            "--message-file", str(msg),
         )  # fmt: skip
 
     def _record(self, run_script, repo, facts, **over):
@@ -1214,8 +1222,9 @@ class TestConnectorTransport:
             "--blob-sha": blob,
             "--parent": self._head(repo),
             "--commit-sha": "4d5e6f7a8b9c",
-            "--repository": "grammy-jiang/verify-compatibility",
+            "--repository": self.REPOSITORY,
             "--branch": "main",
+            "--subject": self.SUBJECT,
         }
         fields.update(over)
         args = [a for k, v in fields.items() if v is not None for a in (k, v)]
@@ -1305,6 +1314,50 @@ class TestConnectorTransport:
         assert out.returncode != 0
         assert "not a sha" in out.stderr
 
+    def test_a_malformed_repository_is_refused_at_plan_time(self, published, run_script):
+        repo, facts = published
+        out = self._plan(run_script, repo, facts, repository="no-slash")
+        assert out.returncode != 0
+        assert "not owner/name" in out.stderr
+
+    def test_an_empty_message_file_is_refused(self, published, run_script, tmp_path):
+        """Same refusal `commit` makes. The subject is what binds the write to
+        what the user approved, so there has to be one."""
+        empty = tmp_path / "empty.txt"
+        empty.write_text("   \n", encoding="utf-8")
+        repo, facts = published
+        out = self._plan(run_script, repo, facts, msg=empty)
+        assert out.returncode != 0
+        assert "message file is empty" in out.stderr
+
+    def test_the_plan_records_what_the_user_approved(self, published, run_script):
+        """Repository, branch and subject are recorded, not merely printed --
+        connector-record compares against these rather than against a fresh
+        read, for the same reason a force-push is leased against the sha the
+        user saw."""
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+        plan = json.loads(facts.read_text())["internal"]["connector"]
+        assert plan["repository"] == self.REPOSITORY
+        assert plan["branch"] == "main"
+        assert plan["subject"] == self.SUBJECT
+
+    def test_a_tampered_plan_cannot_forge_a_refusal_message(self, published, run_script):
+        """The plan is read back off a facts file on disk, so it is caller-
+        supplied too. Its values reach stderr, which is exactly the path on
+        which git's own stderr is neutralised before anybody sees it."""
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+        doc = json.loads(facts.read_text())
+        doc["internal"]["connector"]["blob_sha"] = "dead\x1b[31mbeef\nfake row"
+        facts.write_text(json.dumps(doc), encoding="utf-8")
+
+        out = self._record(run_script, repo, facts)
+
+        assert out.returncode == 7
+        assert "\x1b" not in out.stderr
+        assert "\x1b" not in json.loads(facts.read_text())["commit"]["push"]["reason"]
+
     def test_a_repo_with_no_commits_has_no_baseline_to_publish_onto(
         self, plain_dir, tmp_path, run_script
     ):
@@ -1377,8 +1430,12 @@ class TestConnectorTransport:
             ({"--blob-sha": "0" * 40}, "is not the content this run verified"),
             ({"--parent": "1" * 40}, "the branch moved before the write"),
             ({"--commit-sha": "not-a-sha"}, "is not a sha"),
-            ({"--repository": "no-slash"}, "is not owner/name"),
+            # A syntactically valid owner/name that is simply the wrong project.
+            # This is the case a pattern check alone waves through, and a fork is
+            # where it is most reachable: the parent commit is the same one.
+            ({"--repository": "grammy-jiang/some-other-repo"}, "not the approved repository"),
             ({"--branch": "somewhere-else"}, "not the approved branch"),
+            ({"--subject": "chore: something the user never approved"}, "not the approved message"),
             (
                 {"--commit-url": "https://x-access-token:s3cret@github.com/o/r/commit/4d5"},
                 "carries credentials",
