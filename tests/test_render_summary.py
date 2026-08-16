@@ -465,6 +465,57 @@ class TestRequestedActionAndOutcome:
         assert "choice     not committed" in out
         assert "push" not in out
 
+    def test_a_connector_run_shows_its_outcome_and_no_local_choice(self):
+        """Defect this pins: #56 rendered `choice` beside `commit.status`, so a
+        successful connector write was summarised as
+
+            choice     not committed
+            commit     succeeded — 4d5e6f7
+
+        `choice` is derived from a local commit hash and a local push beside it.
+        A connector run has neither, so there is nothing for it to summarise.
+        """
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "transport": "chatgpt-github-connector",
+                "commit": {
+                    "status": "succeeded",
+                    "sha": "4d5e6f7",
+                    "url": "https://github.com/o/r/commit/4d5e6f7",
+                    "push": {
+                        "status": "pushed",
+                        "sha": "4d5e6f7",
+                        "remote": "o/r",
+                        "branch": "main",
+                    },
+                },
+            }
+        )
+        assert "choice" not in out
+        assert "not committed" not in out
+        assert "transport  chatgpt-github-connector" in out
+        assert "commit     succeeded  4d5e6f7  https://github.com/o/r/commit/4d5e6f7" in out
+        assert "push       4d5e6f7 → o/r/main" in out
+
+    def test_a_write_that_could_not_be_vouched_for_says_so(self):
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "transport": "chatgpt-github-connector",
+                "commit": {
+                    "status": "unverified",
+                    "push": {
+                        "status": "failed",
+                        "reason": "the branch moved before the write",
+                    },
+                },
+            }
+        )
+        assert "commit     unverified" in out
+        assert "push       push failed — the branch moved before the write" in out
+        assert "choice" not in out
+
     def test_a_push_asked_for_and_never_reached_is_still_shown(self):
         """The commit itself was refused, so the outcome is "not committed" --
         which on its own would hide that a push had been wanted at all."""

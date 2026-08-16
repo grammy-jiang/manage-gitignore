@@ -49,6 +49,13 @@ class Agent:
         return home / self.skills_dir
 
 
+# ChatGPT is deliberately absent, and it is the one product the skill names by
+# name. This table is the *installer's*: where a local skills directory lives and
+# how to tell the agent is installed. ChatGPT has neither -- the skill is enabled
+# there through the product, not by a symlink this package could create -- so a
+# row would be an install target that cannot be installed. The half of ChatGPT
+# support that does exist is a transport, and it lives in SKILL.md and
+# references/chatgpt-github-connector.md, which is where the skill is read from.
 AGENTS: tuple[Agent, ...] = (
     Agent(
         key="claude",

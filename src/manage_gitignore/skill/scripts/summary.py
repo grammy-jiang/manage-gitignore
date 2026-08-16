@@ -21,6 +21,7 @@ FACTS schema (all fields optional; sections with no data are skipped):
 {
   "title": "manage-gitignore - run summary",
   "requested_action": "commit + push",
+  "transport": "chatgpt-github-connector",
   "scan":   {"git_repo": true, "gitignore": "existing|none",
              "prev_templates_count": 11, "custom_lines": 0,
              "detected": ["node (scripts/lint-mermaid.mjs)"]},
@@ -35,6 +36,8 @@ FACTS schema (all fields optional; sections with no data are skipped):
   "review": {"negations": ["!*.svg"], "broad": ["*"]},
   "write":  {"path": ".gitignore", "mode": "overwrite|new", "reason": "file existed"},
   "commit": {"choice": "commit + push|commit only|not committed",
+             "status": "succeeded|unverified",
+             "sha": "4d5e6f7", "url": "https://github.com/o/r/commit/4d5e6f7",
              "hash": "6e0a827", "subject": "chore: ...",
              "scope": ".gitignore only", "untouched": "4 staged files",
              "push": {"status": "pushed|attempted|not attempted",
@@ -318,13 +321,26 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # the outcome overwriting the intent, with nothing left to say a push
         # had ever been wanted.
         requested = clean(facts.get("requested_action", ""))
+        # A connector run has no local commit and no local push, so `choice` was
+        # never derived for it -- `status` is its outcome. Showing the two side
+        # by side is what produced "choice: not committed" over "succeeded".
+        remote = clean(commit.get("status", ""))
         # Not `diverged`: this file's neighbours use that word for a branch that
         # needs a force-push, and reusing it for "the ask and the outcome
         # disagree" reads as the other concept.
-        requested_differs = bool(requested) and requested != choice
+        requested_differs = bool(requested) and (bool(remote) or requested != choice)
         rows = [("requested", requested)] if requested_differs else []
-        rows.append(("choice", choice))
-        if commit.get("hash"):
+        transport = clean(facts.get("transport", ""))
+        if transport:
+            rows.append(("transport", transport))
+        if not remote:
+            rows.append(("choice", choice))
+        if remote:
+            where = clean(commit.get("sha", ""))
+            url = clean(commit.get("url", ""))
+            detail = "  ".join(x for x in (pal.hashc(where) if where else "", url) if x)
+            rows.append(("commit", f"{remote}  {detail}" if detail else remote))
+        elif commit.get("hash"):
             subj = clean(commit.get("subject", ""))
             rows.append(("commit", f"{pal.hashc(clean(commit['hash']))}  {subj}"))
         if commit.get("scope"):
@@ -341,20 +357,23 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # run whose commit was refused also has an ask that differs from its
         # outcome, and reporting "not pushed" there invents a push nobody
         # wanted. There is only something to say about a push when one was asked
-        # for.
+        # for -- or when a connector recorded an outcome for one.
         wanted_push = requested == "commit + push"
-        if choice != "not committed" or wanted_push:
+        if choice != "not committed" or wanted_push or remote:
             push = commit.get("push") or {}
             if push.get("sha"):
                 where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"
                 pushed = f"{pal.hashc(clean(push.get('sha', '')))} \u2192 {where}"
             else:
-                # `attempted` means git ran and did not come back: the error text
-                # is the agent's to carry into NOTES, so this row says only that
-                # it failed. `not attempted` carries the plan's own reason.
+                # `attempted` means git ran and did not come back, and `failed`
+                # that a connector write could not be vouched for -- both are a
+                # push that was tried. `attempted` has no reason of its own: the
+                # error text is the agent's to carry into NOTES. `not attempted`
+                # and `failed` carry the refusing tool's own words.
                 status = clean(push.get("status", ""))
                 reason = clean(push.get("reason", ""))
-                pushed = pal.dim("push failed" if status == "attempted" else "not pushed")
+                tried = status in ("attempted", "failed")
+                pushed = pal.dim("push failed" if tried else "not pushed")
                 if reason:
                     pushed += pal.dim(f" — {reason}")
                 elif notes:

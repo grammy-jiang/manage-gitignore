@@ -157,6 +157,29 @@ class TestNothingIsWrittenForOneAgentOnly:
         ]
         assert offenders == []
 
+    def test_every_step_referred_to_is_a_step_that_exists(self):
+        """Defect this pins: a proposed change renumbered SKILL.md's steps and
+        left five cross-references in `references/` pointing at the old numbers.
+        One of them was `push-safety.md`, which sent the force-push path -- the
+        one place where being wrong is unrecoverable -- to what had become the
+        commit step instead of the summary.
+
+        Nothing caught it: the numbers stayed valid, they just stopped meaning
+        what they had meant. The sibling test above pins the same failure for
+        subcommand names, and this is the other half.
+        """
+        body = (cli.skill_source() / "SKILL.md").read_text(encoding="utf-8")
+        defined = {int(n) for n in re.findall(r"^## Step (\d+) ", body, re.MULTILINE)}
+        assert defined, "SKILL.md must define its steps as `## Step N — ...` headings"
+        dangling = [
+            f"{path.name}:{i} -> Step {n}"
+            for path in skill_files()
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            for n in map(int, re.findall(r"\bStep (\d+)\b", line))
+            if n not in defined
+        ]
+        assert dangling == []
+
     def test_no_file_calls_a_subcommand_that_no_longer_exists(self):
         """Defect this pins: `references/push-safety.md` told the agent to run
         `manage-gitignore git ... push`, which stopped being a command when the

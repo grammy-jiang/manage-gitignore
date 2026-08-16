@@ -280,7 +280,15 @@ class PushFacts(TypedDict, total=False):
 
 
 class CommitFacts(TypedDict, total=False):
+    # `choice` is the local transport's outcome, derived from the local trail.
+    # `status` is the connector transport's, checked by connector-record. Exactly
+    # one of the two is ever present: a connector run leaves no local commit for
+    # `choice` to be derived from, and deriving it anyway is how a summary came
+    # to read "not committed" beside "succeeded".
     choice: str  # commit + push | commit only | not committed
+    status: str  # succeeded | unverified
+    sha: str  # the remote commit, once connector-record has vouched for it
+    url: str  # canonical commit URL; never one carrying credentials
     hash: str
     subject: str
     scope: str
@@ -341,6 +349,11 @@ class InternalFacts(TypedDict, total=False):
     commit_text: str
     restore_worktree: str
     restore_index: str  # "" when nothing was staged, i.e. nothing to restore
+    # What connector-plan approved, for connector-record to check the write
+    # against. Kept here rather than passed back through the agent for the same
+    # reason a force-push is leased against the sha the user saw: a value the
+    # caller supplies on both sides cannot catch the caller being wrong.
+    connector: dict[str, str]
 
 
 # Stamped into the facts document by the run that creates it, and required by
@@ -365,6 +378,7 @@ class Facts(TypedDict, total=False):
     # this one an outcome overwrites the intent, and a push that failed reads as
     # a run where no push was ever wanted.
     requested_action: str  # commit + push | commit only | not committed
+    transport: str  # set only when it is not the local one: chatgpt-github-connector
     scan: ScanFacts
     templates: TemplatesFacts
     merge: MergeFacts
