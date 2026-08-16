@@ -36,6 +36,7 @@ from typing import Any, NoReturn, cast
 from shared import (
     FACTS_TOOL,
     Facts,
+    PushFacts,
     PushPlan,
     atomic_write_bytes,
     clean,
@@ -903,11 +904,30 @@ def cmd_push_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
-    """Store where the push landed, from verified state -- never from free text.
+def record_push(
+    args: argparse.Namespace,
+    plan: PushPlan,
+    *,
+    status: str,
+    sha: str = "",
+    reason: str = "",
+) -> None:
+    """Store how far the push got, from verified state -- never from free text.
 
-    Kept as its three pieces rather than a sentence: render_summary owns every
-    display string, exactly as it does for the commit hash and subject.
+    Kept as its pieces rather than a sentence: render_summary owns every display
+    string, exactly as it does for the commit hash and subject.
+
+    Called *before* each push as well as after it. `git(..., check=True)` dies on
+    a push the remote rejects, so a record written only on success is no record
+    at all for the outcome the user most needs to see: the facts document said
+    nothing, `cmd_facts` therefore derived "commit only", and a requested
+    "commit + push" was reported as a run where no push had ever been wanted.
+    Writing `attempted` first leaves the truth on disk whichever way the command
+    ends, and the success path overwrites it with the sha.
+
+    The refusal legs record too, with the plan's own words as `reason`. `remote`
+    is optional here for the same reason: an ambiguous-remote refusal happens
+    precisely because there is no settled remote to name.
     """
     if not args.facts:
         return
@@ -916,12 +936,16 @@ def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
     # removeprefix, not rsplit: "refs/heads/feature/foo" is the branch
     # "feature/foo", and splitting on the last slash would call it "foo".
     branch = ref.removeprefix("refs/heads/")
-    facts.setdefault("commit", {})["push"] = {
-        "sha": sha,
-        # A push only happens once a remote is settled, so this is never null here.
-        "remote": str(plan["remote"]),
-        "branch": branch,
-    }
+    record: PushFacts = {"status": status}
+    if sha:
+        record["sha"] = sha
+    if plan.get("remote"):
+        record["remote"] = str(plan["remote"])
+    if branch:
+        record["branch"] = branch
+    if reason:
+        record["reason"] = reason
+    facts.setdefault("commit", {})["push"] = record
     save_facts(args.facts, facts)
 
 
@@ -937,11 +961,14 @@ def cmd_push(args: argparse.Namespace) -> int:
     action = plan["action"]
 
     if action.startswith("stop-"):
+        record_push(args, plan, status="not attempted", reason=str(plan.get("guidance") or action))
         emit({**plan, "pushed": False})
         print(f"gitwork: not pushing ({action})", file=sys.stderr)
         return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
 
     if action == "fast-forward":
+        # Recorded before git runs, not only after -- see record_push.
+        record_push(args, plan, status="attempted")
         # Explicit refspec: under push.default=matching a bare `git push` would
         # push every matching branch, not just this one.
         git(
@@ -952,7 +979,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             check=True,
         )
         sha = current_short_sha(repo)
-        record_push(args, plan, sha)
+        record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": False})
         return 0
 
@@ -961,6 +988,9 @@ def cmd_push(args: argparse.Namespace) -> int:
         # parse stderr to find out what happened.
         remote = args.remote or plan["remote"]
         if not remote:
+            record_push(
+                args, plan, status="not attempted", reason="several remotes; none was chosen"
+            )
             emit({**plan, "pushed": False, "error": "ambiguous-remote"})
             names = ", ".join(clean(r) for r in plan["remotes"])
             warn = (
@@ -974,6 +1004,12 @@ def cmd_push(args: argparse.Namespace) -> int:
             )
             return EXIT_REMOTE_CHOICE
         if remote not in plan["remotes"]:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason=f"unknown remote {clean(remote)!r}",
+            )
             emit({**plan, "pushed": False, "error": "unknown-remote"})
             names = ", ".join(clean(r) for r in plan["remotes"])
             print(
@@ -981,6 +1017,10 @@ def cmd_push(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_REMOTE_CHOICE
+        # Annotated: a dict display is checked against PushPlan in place, but
+        # binding it to a bare name first widens it to dict[str, object].
+        chosen: PushPlan = {**plan, "remote": remote}
+        record_push(args, chosen, status="attempted")
         git(
             repo,
             "push",
@@ -990,12 +1030,18 @@ def cmd_push(args: argparse.Namespace) -> int:
             check=True,
         )
         sha = current_short_sha(repo)
-        record_push(args, {**plan, "remote": remote}, sha)
+        record_push(args, chosen, status="pushed", sha=sha)
         emit({**plan, "remote": remote, "pushed": True, "forced": False})
         return 0
 
     if action == "diverged":
         if not args.confirm_force:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason=f"branch has diverged; a force would drop {plan['behind']} remote commit(s)",
+            )
             emit({**plan, "pushed": False})
             print(
                 "gitwork: branch has diverged -- a force-push would DROP "
@@ -1010,6 +1056,12 @@ def cmd_push(args: argparse.Namespace) -> int:
         # precisely what the lease is supposed to prevent. Lease explicitly
         # against the sha whose consequences were shown and approved.
         if not args.expect_remote:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason="a force needs the approved --expect-remote sha",
+            )
             emit({**plan, "pushed": False, "error": "missing-expect-remote"})
             print(
                 "gitwork: --confirm-force also requires --expect-remote <sha>, the "
@@ -1020,6 +1072,12 @@ def cmd_push(args: argparse.Namespace) -> int:
             )
             return EXIT_NEEDS_EXPECT
         if args.expect_remote != plan["upstream_sha"]:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason="the remote moved since that plan was approved",
+            )
             emit({**plan, "pushed": False, "error": "remote-moved"})
             print(
                 f"gitwork: the remote moved since that plan was made "
@@ -1029,6 +1087,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_NEEDS_FORCE
+        record_push(args, plan, status="attempted")
         git(
             repo,
             "push",
@@ -1038,7 +1097,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             check=True,
         )
         sha = current_short_sha(repo)
-        record_push(args, plan, sha)
+        record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": True})
         return 0
 
@@ -1090,6 +1149,11 @@ def cmd_facts(args: argparse.Namespace) -> int:
         # Appended through the tool so the rest of the file is never rewritten by
         # hand -- a hand-merge is how computed fields get dropped.
         append_notes(facts, args.note)
+    if args.requested_action:
+        # The one thing no command can read off the repository: the user's
+        # answer. Everything below derives what *happened*; this is what was
+        # *asked*, and the two are allowed to differ.
+        facts["requested_action"] = args.requested_action
     facts.setdefault("scan", {})["git_repo"] = is_repo(repo)
     commit = facts.setdefault("commit", {})
     if args.choice:
@@ -1125,6 +1189,13 @@ def cmd_facts(args: argparse.Namespace) -> int:
     # commit at all is "not committed", which is equally true of a refusal and
     # of the user declining. Nothing here can disagree with the rest of the
     # document, because it is computed from the rest of the document.
+    #
+    # This is the *outcome*, and it stays the outcome. A push that was attempted
+    # and failed leaves `push.status` behind without a sha, so it lands here as
+    # "commit only" -- correct, and no longer the whole story, because
+    # `requested_action` records that a push was wanted and render_summary shows
+    # both. The sha is the discriminator rather than the status because only the
+    # success leg can produce one.
     if not commit.get("choice"):
         if not commit.get("hash"):
             commit["choice"] = "not committed"
@@ -1195,6 +1266,11 @@ def main() -> int:
         help="append a free-form note (repeatable); the only prose field",
     )
     p.add_argument("--hash", help="the commit this run produced (verified, not trusted)")
+    p.add_argument(
+        "--requested-action",
+        choices=("commit + push", "commit only", "not committed"),
+        help="what the user asked for, recorded separately from what happened",
+    )
     p.add_argument(
         "--choice",
         choices=("commit + push", "commit only", "not committed"),

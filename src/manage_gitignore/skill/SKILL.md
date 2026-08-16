@@ -260,23 +260,30 @@ needs one more question: show each candidate **with its URL** from `remote_urls`
 then pass `--remote`.
 
 **A push that did not happen appears two ways** — JSON with `pushed: false`, or a
-non-zero exit with no JSON. Treat both the same: report it, and go to Step 5 with
-no push recorded.
+non-zero exit with no JSON. Treat both the same: report it and go to Step 5.
+`push --facts` has already written down which of the two it was, so there is
+nothing for you to record; carry git's error text in `--note` when there is one.
 
 ## Step 5 — Summary
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
-  --hash "<hash>" --note "<why, when needed>"
+  --requested-action "<what they chose>" --hash "<hash>" --note "<why, when needed>"
 ```
 
 **What happened is derived, not declared.** `commit --facts` recorded the commit,
-`push --facts` recorded the push, and a refused commit recorded its own outcome —
-so `facts` reads the answer off the document rather than being told it. There is
-no choice for you to work out, and nothing to say when the run went normally.
+`push --facts` recorded the push and how far it got, and a refused commit
+recorded its own outcome — so `facts` reads the answer off the document rather
+than being told it. There is no choice for you to work out, and nothing to say
+when the run went normally.
 
 Pass only what the tools cannot know:
 
+- `--requested-action` — the user's Step 4 answer, one of `commit + push`,
+  `commit only`, `not committed`. **Always pass it**, including when the run
+  ended early. It is the only thing here no command can read off the repository,
+  and without it a push that failed is summarised as a run where none was ever
+  wanted. It never overrides an outcome; the summary shows both when they differ.
 - `--hash` — only when `verdict` was `ok`. It is verified, not believed.
 - `--note` — only to carry a reason: a `skip_reason` from Step 4 item 1, the
   `guidance` from a plan that did not permit a push, or the error text from a

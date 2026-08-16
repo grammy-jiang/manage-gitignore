@@ -397,6 +397,69 @@ class TestCommitAndPushRows:
         out = render({"commit": {"choice": "not committed"}})
         assert "not pushed" not in out
 
+
+class TestRequestedActionAndOutcome:
+    """Defect this pins: issue #55. A push that failed was rendered as a bare
+    `choice  commit only`, which is the outcome standing in for the intent."""
+
+    def test_a_failed_push_shows_what_was_asked_for_beside_what_happened(self):
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "commit": {
+                    "choice": "commit only",
+                    "hash": "726bc13",
+                    "subject": "chore: refresh .gitignore",
+                    "push": {"status": "attempted", "remote": "origin", "branch": "main"},
+                },
+                "notes": ["fatal: could not read Username for 'https://github.com'"],
+            }
+        )
+        assert "requested  commit + push" in out
+        assert "choice     commit only" in out
+        assert "push       push failed — see NOTES" in out
+
+    def test_a_refusal_carries_the_reason_the_plan_gave(self):
+        """`not attempted` has the tool's own words for why, so the row explains
+        itself instead of pointing at NOTES for something no note may hold."""
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "commit": {
+                    "choice": "commit only",
+                    "hash": "726bc13",
+                    "push": {
+                        "status": "not attempted",
+                        "remote": "origin",
+                        "branch": "main",
+                        "reason": "branch has diverged; a force would drop 1 remote commit(s)",
+                    },
+                },
+            }
+        )
+        assert "not pushed — branch has diverged" in out
+        assert "see NOTES" not in out
+
+    def test_an_ordinary_run_does_not_repeat_itself(self):
+        """When the ask and the outcome agree there is nothing to reconcile, and
+        a `requested` row would be a second copy of the row beneath it."""
+        out = render({**FULL_FACTS, "requested_action": "commit + push"})
+        assert "requested" not in out
+        assert render(FULL_FACTS) == out
+
+    def test_a_push_asked_for_and_never_reached_is_still_shown(self):
+        """The commit itself was refused, so the outcome is "not committed" --
+        which on its own would hide that a push had been wanted at all."""
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "commit": {"choice": "not committed"},
+                "notes": ["commit refused: .gitignore changed after it was verified"],
+            }
+        )
+        assert "requested  commit + push" in out
+        assert "push       not pushed — see NOTES" in out
+
     def test_delta_is_derived_from_the_template_lists(self):
         """One source: NET must not carry its own copy that can disagree."""
         out = render(FULL_FACTS)
