@@ -363,7 +363,7 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
                     ]
                 )
                 reason = clean(push_outcome.get("reason", "")) if push_outcome.get("reason") else ""
-                suffix = where or reason
+                suffix = " — ".join([x for x in [where, reason] if x])
                 pushed = f"{status} — {suffix}" if suffix else status
             else:
                 push = commit.get("push")
