@@ -1049,6 +1049,37 @@ class TestAPushThatDidNotHappenIsStillRecorded:
         assert "several remotes" in push["reason"]
         assert "remote" not in push
 
+    def test_a_facts_file_from_another_repo_stops_the_push_before_it_happens(
+        self, remote_pair, run_script, tmp_path
+    ):
+        """Survived: `getattr(args, "dir", None)` -> `getattr(args, "", None)`.
+
+        `load_facts` only refuses a document belonging to a different repository
+        when it is told which repository this is; without the name it skips the
+        check. Nothing had ever driven `push --facts` at a foreign facts file, so
+        emptying that string disabled the guard with the suite green.
+
+        Recording before the push is what makes this worth pinning rather than
+        merely correct: the refusal now happens *before* `git push` runs, so a
+        mismatched facts file cannot be discovered only after the remote already
+        has the commit.
+        """
+        work, bare = remote_pair
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        facts = tmp_path / "foreign.json"
+        facts.write_text(facts_doc(write={"path": str(elsewhere / ".gitignore")}), encoding="utf-8")
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "ours")
+        before = remote_head(bare)
+
+        out = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts))
+
+        assert out.returncode != 0
+        assert "belongs to a different run" in out.stderr
+        assert remote_head(bare) == before, "it must refuse before pushing, not after"
+
     def test_a_requested_push_that_failed_is_not_summarised_as_commit_only(
         self, remote_pair, run_script, facts_file
     ):
