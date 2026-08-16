@@ -944,6 +944,18 @@ def record_push(
     # says anything about what this run did. Only an attempt can replace the
     # record of an attempt -- which is why the guard is on the status and not on
     # a list of actions, where every one left off would be this bug again.
+    #
+    # `attempted` deliberately still overwrites, and review argued it should not:
+    # a second push of a SECOND commit, rejected, would replace a landed record
+    # while the first commit is still on the remote. Declined, twice over. The
+    # procedure makes one commit and at most one push -- push-safety's force is
+    # the alternative to that push, not an extra one -- so reaching it means the
+    # agent has left the procedure, and the document is no longer describing the
+    # run it claims to. And the proposed test, "is the recorded sha still in the
+    # upstream history", needs a git call on the pre-push write path plus a fetch
+    # to be current; against a stale tracking ref it would assert `pushed` for a
+    # sha a force had already removed. That is the same class of error in the
+    # more dangerous direction. Revisit if this skill ever pushes twice.
     if status == "not attempted" and ((facts.get("commit") or {}).get("push") or {}).get("sha"):
         return
     ref = plan.get("merge_ref") or plan.get("branch") or ""
