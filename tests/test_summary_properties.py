@@ -383,6 +383,11 @@ class TestAFailedPushCannotBeForgedEither:
             "push": {"status": "not attempted", "remote": "origin", "branch": "main"},
         },
     }
+    # NOTE: the connector shape has its own fields -- `commit.status`, `.sha`
+    # and `.url` -- covered by TestAConnectorOutcomeCannotBeForged below, for
+    # the same reason this class exists: they cannot be reached from a document
+    # that also carries a local `commit.hash`.
+    #
     # `reason` is displayed. `status` is only ever compared against a literal,
     # so it must reach the output *nowhere* -- both are checked below, because
     # "it is only a discriminator" is a claim about today's renderer.
@@ -425,6 +430,73 @@ class TestAFailedPushCannotBeForgedEither:
     @PROPERTY
     @given(field=st.sampled_from(PATHS), value=POISONED)
     def test_no_field_of_a_failed_push_can_forge_a_line_in_ordinary_text(self, field, value):
+        baseline = self._rendered(self._with(field, "ordinary"))
+        assert len(self._rendered(self._with(field, value)).splitlines()) == len(
+            baseline.splitlines()
+        )
+
+
+class TestAConnectorOutcomeCannotBeForged:
+    """The third document shape: a write made through the GitHub connector.
+
+    Its fields are the most exposed in the document. `commit.sha` and
+    `commit.url` are whatever the connector reported -- `connector-record`
+    checks their shape and refuses a URL carrying credentials, but a sha is
+    still a remote value arriving as text, and the URL is the only field the
+    summary renders that is a full URL rather than a name.
+
+    Kept apart from the grid above because a connector run has no
+    `commit.hash`, and the renderer shows one branch or the other. Poisoning
+    these on FULL_FACTS would render the local branch and check nothing.
+    """
+
+    BASE: ClassVar[dict] = {
+        "requested_action": "commit + push",
+        "transport": "chatgpt-github-connector",
+        "commit": {
+            "status": "succeeded",
+            "sha": "4d5e6f7",
+            "url": "https://github.com/o/r/commit/4d5e6f7",
+            "push": {"status": "pushed", "sha": "4d5e6f7", "remote": "o/r", "branch": "main"},
+        },
+    }
+    PATHS = ("status", "sha", "url", "transport")
+
+    @classmethod
+    def _with(cls, key: str, value: object):
+        base = copy.deepcopy(cls.BASE)
+        if key == "transport":
+            base[key] = value
+        else:
+            base["commit"][key] = value
+        return base
+
+    @staticmethod
+    def _rendered(facts):
+        return summary.render(facts, summary.Pal(False))
+
+    def test_every_field_here_actually_reaches_the_output(self):
+        marker = "MARKER" + "VALUE"
+        missing = [
+            key for key in self.PATHS if marker not in self._rendered(self._with(key, marker))
+        ]
+        assert missing == []
+
+    def test_no_connector_field_can_forge_anything(self):
+        failures = []
+        for key in self.PATHS:
+            baseline = len(self._rendered(self._with(key, "ordinary")).splitlines())
+            for char in MUST_NOT_SURVIVE:
+                rendered = self._rendered(self._with(key, f"before{char}after"))
+                if len(rendered.splitlines()) != baseline or any(
+                    shared.SUSPICIOUS_CHARS.search(line) for line in rendered.splitlines()
+                ):
+                    failures.append(f"{key} U+{ord(char):04X}")
+        assert not failures, f"{len(failures)} forged: {failures[:10]}"
+
+    @PROPERTY
+    @given(field=st.sampled_from(PATHS), value=POISONED)
+    def test_no_connector_field_can_forge_a_line_in_ordinary_text(self, field, value):
         baseline = self._rendered(self._with(field, "ordinary"))
         assert len(self._rendered(self._with(field, value)).splitlines()) == len(
             baseline.splitlines()

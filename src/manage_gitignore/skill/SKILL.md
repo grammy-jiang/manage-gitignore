@@ -156,6 +156,13 @@ Step 4's `status` reports the committed version, and it is the one to show.
 
 ## Step 4 — Review, commit, push (`.gitignore` ONLY)
 
+**In ChatGPT, the commit goes through the GitHub connector, not through git.**
+Read your host's runtime context — not a shell flag, not `git`, not tokens on
+disk. If it says ChatGPT or ChatGPT Work, follow
+[references/chatgpt-github-connector.md](references/chatgpt-github-connector.md)
+from item 3 of this step onward; items 1 and 2 are the same either way. Every
+other host uses this step as written.
+
 Never stage, commit, or suggest committing any other file — and never another
 change to this one. Step 3 refuses to start from a `.gitignore` that already
 carries an uncommitted edit, so everything the diff shows here is this run's
@@ -309,7 +316,10 @@ That output *is* the closing summary; do not hand-format a second one. Then
 - Never hand-write `.gitignore` or hand-edit the template block or custom rules.
   If the API is unreachable, say so; do not fake it.
 - Never run `git add`/`commit`/`push` yourself. `scripts/gitwork.py` is the only
-  path to a mutation, and it fails closed.
+  path to a *local* mutation, and it fails closed. In ChatGPT the connector makes
+  the remote one instead — still not you, and still through `gitwork.py`, which
+  computes what the write must send and refuses to call the result a success
+  unless that is what came back.
 - This skill modifies and commits **only** `.gitignore`, and within it only the
   change this run made.
 - Commit messages go through a file and `--message-file`. Never a heredoc or

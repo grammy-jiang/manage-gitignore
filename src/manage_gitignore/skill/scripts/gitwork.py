@@ -15,6 +15,8 @@ Subcommands (all take --dir REPO, default "."):
   commit         add + commit ONLY .gitignore from a message file, then verify
   push-plan      classify the push situation; emit the one permitted action
   push           execute exactly what push-plan permits (--confirm-force to force)
+  connector-plan    what a GitHub-connector write must send, recorded for checking
+  connector-record  record such a write, and only if it is the approved one
   facts          merge git-side facts into the JSON gitignore.py --facts-out wrote
 
 Every subcommand prints JSON to stdout (plus human-readable text to stderr where
@@ -24,6 +26,7 @@ useful) and exits non-zero on any failure worth stopping for.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -59,6 +62,7 @@ EXIT_NOT_PUSHED = 3  # a stop-* action: nothing to push
 EXIT_NEEDS_FORCE = 4  # diverged, or the approved remote state moved
 EXIT_REMOTE_CHOICE = 5  # ambiguous or unknown remote
 EXIT_NEEDS_EXPECT = 6  # a force was asked for without the approved sha
+EXIT_CONNECTOR = 7  # a connector write is not the one that was approved
 
 
 def die(msg: str) -> NoReturn:
@@ -1098,6 +1102,189 @@ def cmd_push(args: argparse.Namespace) -> int:
     die(f"unhandled push action: {action}")
 
 
+# ── connector ───────────────────────────────────────────────────────────────
+# A second transport, for hosts where this process cannot reach the remote at
+# all: in ChatGPT the GitHub connector holds the credentials and only the model
+# can call it. So the mutation is the agent's to make -- but nothing else is.
+#
+# `connector-plan` computes the values the write must use and writes them down;
+# `connector-record` refuses to call the result a success unless what came back
+# is those same values. The agent carries bytes between two gates it cannot move,
+# which is the most this side of the boundary can enforce and considerably more
+# than trusting it to report honestly.
+SHA_PATTERN = re.compile(r"[0-9a-f]{7,64}")
+REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}")
+CONNECTOR_TRANSPORT = "chatgpt-github-connector"
+
+
+def publication_bytes(repo: str, facts: Facts) -> bytes:
+    """Exactly the bytes this run verified and would commit.
+
+    Not simply the file on disk: when Step 3 carried an uncommitted change
+    across, the work tree holds this run's rebuild *plus* the user's own edit,
+    and `internal.commit_text` is the part this run owns. Publishing the work
+    tree there would push somebody's unrelated edit to the remote.
+    """
+    internal = facts.get("internal") or {}
+    expected = internal.get("written_sha256")
+    if not expected:
+        die("no verified content in the facts file; run the write step first")
+    carried = internal.get("commit_text")
+    content = (
+        carried.encode("utf-8") if carried else read_bytes_or_die(os.path.join(repo, TARGET), die)
+    )
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        # The same gate cmd_commit applies before staging. A connector write is
+        # the harder case: there is no index to inspect afterwards and no local
+        # commit to compare against, so this is the only place it can be caught.
+        die(
+            f"{TARGET} changed since it was written and verified "
+            f"(sha256 {actual[:12]} != {expected[:12]}); refusing to publish it"
+        )
+    return content
+
+
+def cmd_connector_plan(args: argparse.Namespace) -> int:
+    """Emit what a connector write must send, and record it for verification.
+
+    `--expect-head` is the branch head the connector reports, and it must equal
+    local HEAD. That is not a formality: the merge in Step 3 rebuilt from the
+    *local* `.gitignore`, so a checkout behind the branch would drop every custom
+    rule added on the remote since -- silently, because the branch head has not
+    moved by the time the write happens and every later check would still pass.
+    Refusing here is the only point where the two baselines can still be compared.
+    """
+    repo = args.dir
+    require_repo(repo)
+    refuse_facts_alias(repo, args.facts)
+    facts = load_facts(args.facts, repo)
+
+    if not SHA_PATTERN.fullmatch(args.expect_head):
+        die(f"--expect-head is not a sha: {clean(args.expect_head)!r}")
+    rc, head, _ = git(repo, "rev-parse", "HEAD")
+    if rc != 0 or not head:
+        die("cannot resolve HEAD; a connector write needs a committed baseline")
+    # startswith, not equality: a connector may report an abbreviated sha, and
+    # the local side is always full. The length check above bounds the abbrev.
+    if not head.startswith(args.expect_head):
+        die(
+            f"the local checkout is not at the branch head the connector reports "
+            f"({head[:12]} != {clean(args.expect_head)[:12]}); the rebuild would be "
+            "based on a different .gitignore than the one being replaced"
+        )
+
+    content = publication_bytes(repo, facts)
+    carried = (facts.get("internal") or {}).get("commit_text")
+    if carried:
+        rc, blob, err = git(repo, "hash-object", "--stdin", stdin=carried)
+    else:
+        rc, blob, err = git(repo, "hash-object", "--", os.path.join(repo, TARGET))
+    if rc != 0 or not blob:
+        die(f"cannot hash {TARGET}: {err or 'no stderr'}")
+
+    plan = {
+        "path": TARGET,
+        "blob_sha": blob,
+        "expected_parent": head,
+        "branch": args.branch,
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+    # Written down, not just printed. connector-record compares against what was
+    # approved here rather than against a fresh read -- the same reason a force
+    # push is leased against the sha the user saw and not against the ref this
+    # command's own fetch just moved.
+    facts["transport"] = CONNECTOR_TRANSPORT
+    internal = cast("dict[str, Any]", facts.setdefault("internal", {}))
+    internal["connector"] = {k: v for k, v in plan.items() if k != "content_base64"}
+    save_facts(args.facts, facts)
+    emit(plan)
+    return 0
+
+
+def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> str | None:
+    """The first thing the connector reported that is not what was approved.
+
+    One function returning one reason, so every caller refuses on the same set
+    and the summary carries the tool's words rather than the agent's.
+    """
+    if not SHA_PATTERN.fullmatch(args.commit_sha):
+        return f"the commit sha is not a sha: {clean(args.commit_sha)!r}"
+    if args.blob_sha != plan.get("blob_sha"):
+        return (
+            f"the blob the connector stored ({clean(args.blob_sha)[:12]}) is not the "
+            f"content this run verified ({str(plan.get('blob_sha'))[:12]})"
+        )
+    parent = str(plan.get("expected_parent") or "")
+    if not args.parent or not parent.startswith(args.parent):
+        return (
+            f"the commit's parent ({clean(args.parent)[:12]}) is not the head this "
+            f"run was based on ({parent[:12]}); the branch moved before the write"
+        )
+    changed = sorted(args.changed_path or [])
+    if changed != [TARGET]:
+        return f"the commit changed {changed} -- expected only {[TARGET]}"
+    if not REPOSITORY_PATTERN.fullmatch(args.repository):
+        return f"the repository is not owner/name: {clean(args.repository)!r}"
+    if args.branch != plan.get("branch"):
+        return (
+            f"the write landed on {clean(args.branch)!r}, not the approved branch "
+            f"{str(plan.get('branch'))!r}"
+        )
+    if args.commit_url:
+        # Refused rather than trimmed: a URL carrying credentials is evidence the
+        # connector's authentication has already reached somewhere it must never
+        # be, and this document is written to disk and shown to the user.
+        if not args.commit_url.startswith("https://"):
+            return f"the commit URL is not https: {clean(args.commit_url)!r}"
+        authority = args.commit_url[len("https://") :].split("/", 1)[0]
+        if "@" in authority:
+            return "the commit URL carries credentials in its authority; refusing to record it"
+    return None
+
+
+def cmd_connector_record(args: argparse.Namespace) -> int:
+    """Record a connector write, and only if it is the one that was approved.
+
+    Every value here comes from the agent, which is why not one of them is taken
+    on its word: each is compared against what `connector-plan` wrote down. A
+    mismatch is `unverified` -- deliberately not "failed", because the remote
+    commit may well exist. It is this run that cannot vouch for it.
+    """
+    repo = args.dir
+    refuse_facts_alias(repo, args.facts)
+    facts = load_facts(args.facts, repo)
+    plan = (facts.get("internal") or {}).get("connector")
+    if not isinstance(plan, dict):
+        die("no connector plan in the facts file; run connector-plan before writing")
+
+    commit = cast("dict[str, Any]", facts.setdefault("commit", {}))
+    reason = connector_mismatch(plan, args)
+    if reason:
+        commit["status"] = "unverified"
+        commit["push"] = {"status": "failed", "reason": reason}
+        save_facts(args.facts, facts)
+        emit({"verified": False, "reason": reason})
+        print(f"gitwork: {reason}", file=sys.stderr)
+        return EXIT_CONNECTOR
+    commit["status"] = "succeeded"
+    commit["sha"] = args.commit_sha
+    if args.commit_url:
+        commit["url"] = args.commit_url
+    # The same single home the local transport writes to: one push record per
+    # document, whichever transport produced it.
+    commit["push"] = {
+        "status": "pushed",
+        "sha": args.commit_sha,
+        "remote": args.repository,
+        "branch": args.branch,
+    }
+    save_facts(args.facts, facts)
+    emit({"verified": True, "sha": args.commit_sha, "repository": args.repository})
+    return 0
+
+
 # ── facts ───────────────────────────────────────────────────────────────────
 def diffstat(repo: str, commit_hash: str | None) -> str:
     """The diffstat for whichever end state .gitignore is actually in."""
@@ -1190,7 +1377,14 @@ def cmd_facts(args: argparse.Namespace) -> int:
     # `requested_action` records that a push was wanted and render_summary shows
     # both. The sha is the discriminator rather than the status because only the
     # success leg can produce one.
-    if not commit.get("choice"):
+    #
+    # Skipped entirely when a connector recorded its own outcome. `choice` reads
+    # the local trail -- a local commit hash, a local push beside it -- and a
+    # connector run leaves neither, so deriving it there produced a document that
+    # said `choice: not committed` next to `commit: succeeded`. There is nothing
+    # to summarise into: `commit.status` and `commit.push.status` already say what
+    # happened, and render_summary shows those instead.
+    if not commit.get("choice") and not commit.get("status"):
         if not commit.get("hash"):
             commit["choice"] = "not committed"
         else:
@@ -1251,6 +1445,32 @@ def main() -> int:
     p.add_argument("--remote", help="which remote, when the branch has no upstream")
     p.add_argument("--facts", help="also record the push line into this facts JSON")
 
+    p = subcommand("connector-plan", help="what a GitHub-connector write must send")
+    p.add_argument("--facts", required=True)
+    p.add_argument(
+        "--expect-head",
+        required=True,
+        metavar="SHA",
+        help="the branch head the connector reports; must equal local HEAD",
+    )
+    p.add_argument("--branch", required=True, help="the branch the write will land on")
+
+    p = subcommand("connector-record", help="record a connector write, if it is the approved one")
+    p.add_argument("--facts", required=True)
+    p.add_argument("--blob-sha", required=True, help="the blob sha the connector stored")
+    p.add_argument("--parent", required=True, metavar="SHA", help="the new commit's parent")
+    p.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        required=True,
+        help=f"a path the commit changed (repeatable); must be exactly {TARGET}",
+    )
+    p.add_argument("--commit-sha", required=True, help="the sha the connector created")
+    p.add_argument("--repository", required=True, help="owner/name, as the connector reports it")
+    p.add_argument("--branch", required=True, help="the branch the write landed on")
+    p.add_argument("--commit-url", help="canonical commit URL; refused if it carries credentials")
+
     p = subcommand("facts", help="merge git facts into a facts JSON file")
     p.add_argument("--facts", required=True)
     p.add_argument(
@@ -1279,6 +1499,8 @@ def main() -> int:
         "commit": cmd_commit,
         "push-plan": cmd_push_plan,
         "push": cmd_push,
+        "connector-plan": cmd_connector_plan,
+        "connector-record": cmd_connector_record,
         "facts": cmd_facts,
     }
     return handlers[args.cmd](args)

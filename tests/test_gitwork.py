@@ -8,6 +8,7 @@ versions of this file; those say so in the docstring.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import subprocess
@@ -1165,6 +1166,283 @@ class TestAPushThatDidNotHappenIsStillRecorded:
         assert facts["requested_action"] == "commit + push"
         assert facts["commit"]["choice"] == "commit only"
         assert facts["commit"]["push"]["status"] == "attempted"
+
+
+# ── connector ───────────────────────────────────────────────────────────────
+class TestConnectorTransport:
+    """The GitHub-connector path, where the mutation is the agent's to make.
+
+    Every value `connector-record` takes comes from the agent, so every test
+    here is about one of them being wrong. The point of the two commands is that
+    a wrong one is an exit code rather than a plausible sentence in a summary.
+    """
+
+    CONTENT = "node_modules/\n"
+
+    @pytest.fixture
+    def published(self, repo, tmp_path):
+        """A repo whose .gitignore is committed, with facts naming its sha256.
+
+        Committed, because a connector write replaces what is on the branch: the
+        plan refuses a checkout that is not at the head it is told to build on,
+        and an uncommitted .gitignore has no head to be at.
+        """
+        write_gitignore(repo, self.CONTENT)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        path = tmp_path / "facts.json"
+        digest = hashlib.sha256(self.CONTENT.encode()).hexdigest()
+        path.write_text(facts_doc(internal={"written_sha256": digest}), encoding="utf-8")
+        return repo, path
+
+    @staticmethod
+    def _head(repo):
+        return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def _plan(self, run_script, repo, facts, head=None, branch="main"):
+        return run_script(
+            "gitwork.py", "--dir", str(repo), "connector-plan",
+            "--facts", str(facts),
+            "--expect-head", head or self._head(repo),
+            "--branch", branch,
+        )  # fmt: skip
+
+    def _record(self, run_script, repo, facts, **over):
+        blob = git(repo, "hash-object", "--", str(repo / ".gitignore")).stdout.strip()
+        changed = over.pop("changed", None) or [".gitignore"]
+        fields = {
+            "--blob-sha": blob,
+            "--parent": self._head(repo),
+            "--commit-sha": "4d5e6f7a8b9c",
+            "--repository": "grammy-jiang/verify-compatibility",
+            "--branch": "main",
+        }
+        fields.update(over)
+        args = [a for k, v in fields.items() if v is not None for a in (k, v)]
+        for path in changed:
+            args += ["--changed-path", path]
+        return run_script(
+            "gitwork.py", "--dir", str(repo), "connector-record", "--facts", str(facts), *args
+        )
+
+    # ── the plan ────────────────────────────────────────────────────────────
+    def test_the_plan_publishes_the_bytes_that_were_verified(self, published, run_script):
+        repo, facts = published
+        out = self._plan(run_script, repo, facts)
+
+        assert out.returncode == 0, out.stderr
+        plan = json.loads(out.stdout)
+        assert base64.b64decode(plan["content_base64"]).decode() == self.CONTENT
+        assert plan["content_sha256"] == hashlib.sha256(self.CONTENT.encode()).hexdigest()
+        assert (
+            plan["blob_sha"]
+            == git(repo, "hash-object", "--", str(repo / ".gitignore")).stdout.strip()
+        )
+        assert plan["expected_parent"] == self._head(repo)
+        assert json.loads(facts.read_text())["transport"] == "chatgpt-github-connector"
+
+    def test_a_checkout_behind_the_branch_is_refused(self, published, run_script):
+        """The defect this exists for: Step 3 rebuilt from the *local* file, so
+        publishing from a stale checkout drops every custom rule added on the
+        remote since -- silently, because the branch head has not moved by the
+        time the write happens and every later check still passes."""
+        repo, facts = published
+        out = self._plan(run_script, repo, facts, head="0" * 40)
+
+        assert out.returncode != 0
+        assert "not at the branch head" in out.stderr
+        assert "transport" not in json.loads(facts.read_text())
+
+    def test_a_file_edited_since_it_was_verified_is_refused(self, published, run_script):
+        """The gate cmd_commit applies before staging. Here it is the only one
+        there is: a connector write leaves no index to inspect afterwards."""
+        repo, facts = published
+        write_gitignore(repo, "something-else/\n")
+        out = self._plan(run_script, repo, facts)
+
+        assert out.returncode != 0
+        assert "changed since it was written and verified" in out.stderr
+
+    def test_a_carried_across_edit_is_never_published(self, repo, tmp_path, run_script):
+        """The work tree holds this run's rebuild *plus* the user's own edit when
+        Step 3 carried one across. `internal.commit_text` is the part this run
+        owns, and publishing the work tree instead would push somebody's
+        unrelated change to the remote -- where, unlike a local commit, they
+        cannot simply reset it away.
+        """
+        mine = "node_modules/\n"
+        theirs = mine + "their-own-secret-note\n"
+        write_gitignore(repo, mine)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        write_gitignore(repo, theirs)  # the user's edit, still in the work tree
+        facts = tmp_path / "facts.json"
+        facts.write_text(
+            facts_doc(
+                internal={
+                    "written_sha256": hashlib.sha256(mine.encode()).hexdigest(),
+                    "commit_text": mine,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = self._plan(run_script, repo, facts)
+
+        assert out.returncode == 0, out.stderr
+        plan = json.loads(out.stdout)
+        assert base64.b64decode(plan["content_base64"]).decode() == mine
+        assert "their-own-secret-note" not in base64.b64decode(plan["content_base64"]).decode()
+        # And the blob is the one for those bytes, not for what is on disk.
+        assert (
+            plan["blob_sha"]
+            != git(repo, "hash-object", "--", str(repo / ".gitignore")).stdout.strip()
+        )
+
+    def test_a_non_sha_expect_head_is_refused(self, published, run_script):
+        repo, facts = published
+        out = self._plan(run_script, repo, facts, head="HEAD")
+        assert out.returncode != 0
+        assert "not a sha" in out.stderr
+
+    def test_a_repo_with_no_commits_has_no_baseline_to_publish_onto(
+        self, plain_dir, tmp_path, run_script
+    ):
+        """An unborn HEAD: there is no branch head for the connector's tree to be
+        based on, so the write cannot be a fast-forward of anything."""
+        subprocess.run(["git", "init", "-q", "-b", "main", str(plain_dir)], check=True)
+        write_gitignore(plain_dir, self.CONTENT)
+        facts = tmp_path / "facts.json"
+        facts.write_text(
+            facts_doc(
+                internal={"written_sha256": hashlib.sha256(self.CONTENT.encode()).hexdigest()}
+            ),
+            encoding="utf-8",
+        )
+
+        out = self._plan(run_script, plain_dir, facts, head="0" * 40)
+
+        assert out.returncode != 0
+        assert "needs a committed baseline" in out.stderr
+
+    def test_a_run_that_verified_nothing_cannot_publish(self, repo, tmp_path, run_script):
+        write_gitignore(repo, self.CONTENT)
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "base")
+        facts = tmp_path / "facts.json"
+        facts.write_text(facts_doc(), encoding="utf-8")
+
+        out = self._plan(run_script, repo, facts)
+
+        assert out.returncode != 0
+        assert "no verified content" in out.stderr
+
+    # ── the record ──────────────────────────────────────────────────────────
+    def test_a_verified_write_is_recorded_as_the_commit_and_the_push(self, published, run_script):
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+
+        out = self._record(
+            run_script,
+            repo,
+            facts,
+            **{"--commit-url": "https://github.com/grammy-jiang/verify-compatibility/commit/4d5e"},
+        )
+
+        assert out.returncode == 0, out.stderr
+        assert json.loads(out.stdout)["verified"] is True
+        commit = json.loads(facts.read_text())["commit"]
+        assert commit["status"] == "succeeded"
+        assert commit["sha"] == "4d5e6f7a8b9c"
+        assert commit["url"].startswith("https://github.com/")
+        # One home for the push, whichever transport produced it.
+        assert commit["push"] == {
+            "status": "pushed",
+            "sha": "4d5e6f7a8b9c",
+            "remote": "grammy-jiang/verify-compatibility",
+            "branch": "main",
+        }
+
+    def test_recording_without_a_plan_is_refused(self, published, run_script):
+        """Nothing to check against is not the same as nothing wrong."""
+        repo, facts = published
+        out = self._record(run_script, repo, facts)
+
+        assert out.returncode != 0
+        assert "no connector plan" in out.stderr
+
+    @pytest.mark.parametrize(
+        ("over", "expected"),
+        [
+            ({"--blob-sha": "0" * 40}, "is not the content this run verified"),
+            ({"--parent": "1" * 40}, "the branch moved before the write"),
+            ({"--commit-sha": "not-a-sha"}, "is not a sha"),
+            ({"--repository": "no-slash"}, "is not owner/name"),
+            ({"--branch": "somewhere-else"}, "not the approved branch"),
+            (
+                {"--commit-url": "https://x-access-token:s3cret@github.com/o/r/commit/4d5"},
+                "carries credentials",
+            ),
+            ({"--commit-url": "http://github.com/o/r/commit/4d5"}, "is not https"),
+        ],
+    )
+    def test_a_write_that_is_not_the_approved_one_is_never_called_a_success(
+        self, published, run_script, over, expected
+    ):
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+
+        out = self._record(run_script, repo, facts, **over)
+
+        assert out.returncode == 7, out.stdout
+        assert expected in out.stderr
+        commit = json.loads(facts.read_text())["commit"]
+        # `unverified`, not `failed`: the remote commit may well exist. What has
+        # failed is this run's ability to vouch for it.
+        assert commit["status"] == "unverified"
+        assert "sha" not in commit
+        assert commit["push"]["status"] == "failed"
+        assert expected in commit["push"]["reason"]
+
+    def test_a_commit_touching_more_than_gitignore_is_refused(self, published, run_script):
+        """The same rule the local transport enforces by reading the commit. Here
+        the paths come from the agent, which is exactly why they are compared
+        rather than trusted."""
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+
+        out = self._record(run_script, repo, facts, changed=[".gitignore", "src/secrets.env"])
+
+        assert out.returncode == 7
+        assert "expected only ['.gitignore']" in out.stderr
+
+    def test_the_recoverable_exit_code_is_the_one_the_table_names(self, published, run_script):
+        """Written out as a number too. Asserting `== gw.EXIT_CONNECTOR` moves
+        the expectation with the constant, and the codes are a caller contract:
+        SKILL.md tells agents to branch on them rather than match message text."""
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+        out = self._record(run_script, repo, facts, **{"--blob-sha": "0" * 40})
+        assert out.returncode == gw.EXIT_CONNECTOR == 7
+
+    # ── what it leaves for the summary ──────────────────────────────────────
+    def test_a_connector_run_never_derives_a_local_choice(self, published, run_script):
+        """Defect this pins: `choice` is derived from a local commit hash and a
+        local push beside it, and a connector run has neither -- so it came out
+        `not committed` and the summary said that next to `commit: succeeded`."""
+        repo, facts = published
+        assert self._plan(run_script, repo, facts).returncode == 0
+        assert self._record(run_script, repo, facts).returncode == 0
+
+        out = run_script(
+            "gitwork.py", "--dir", str(repo), "facts", "--facts", str(facts),
+            "--requested-action", "commit + push",
+        )  # fmt: skip
+
+        assert out.returncode == 0, out.stderr
+        commit = json.loads(facts.read_text())["commit"]
+        assert "choice" not in commit
+        assert commit["status"] == "succeeded"
 
 
 # ── facts ───────────────────────────────────────────────────────────────────
