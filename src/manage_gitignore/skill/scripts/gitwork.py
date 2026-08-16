@@ -1215,6 +1215,17 @@ def cmd_connector_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def same_sha(reported: str, expected: str) -> bool:
+    """True when two shas name the same object, either of them abbreviated.
+
+    A connector may report a full sha where the plan holds an abbreviation, or
+    the reverse, so neither side can be required to be longer. Both are
+    shape-checked by SHA_PATTERN before this is called -- which is what stops a
+    one-character "abbreviation" matching almost everything.
+    """
+    return reported.startswith(expected) or expected.startswith(reported)
+
+
 def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> str | None:
     """The first thing the connector reported that is not what was approved.
 
@@ -1241,11 +1252,24 @@ def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> 
     # into one that detects almost nothing.
     if not SHA_PATTERN.fullmatch(args.parent):
         return f"the commit's parent is not a sha: {clean(args.parent)!r}"
+    if not SHA_PATTERN.fullmatch(args.branch_head):
+        return f"the branch head is not a sha: {clean(args.branch_head)!r}"
     parent = clean(plan.get("expected_parent") or "")
-    if not parent.startswith(args.parent):
+    if not same_sha(args.parent, parent):
         return (
             f"the commit's parent ({clean(args.parent)[:12]}) is not the head this "
             f"run was based on ({parent[:12]}); the branch moved before the write"
+        )
+    # Creating the commit object and moving the branch onto it are two separate
+    # connector calls, and only the second one publishes anything. If the ref
+    # update is skipped, rejected, or aimed elsewhere, every other field here
+    # still matches -- `--branch` is only the branch that was *planned* -- and
+    # the run would record `pushed` for a commit no branch points at.
+    if not same_sha(args.branch_head, args.commit_sha):
+        return (
+            f"the branch head after the write ({clean(args.branch_head)[:12]}) is not the "
+            f"commit that was created ({clean(args.commit_sha)[:12]}); the ref update "
+            "did not land"
         )
     changed = sorted(args.changed_path or [])
     if changed != [TARGET]:
@@ -1285,9 +1309,27 @@ def connector_mismatch(plan: Mapping[str, object], args: argparse.Namespace) -> 
         # be, and this document is written to disk and shown to the user.
         if not args.commit_url.startswith("https://"):
             return f"the commit URL is not https: {clean(args.commit_url)!r}"
-        authority = args.commit_url[len("https://") :].split("/", 1)[0]
+        rest = args.commit_url[len("https://") :]
+        authority, _, path = rest.partition("/")
         if "@" in authority:
             return "the commit URL carries credentials in its authority; refusing to record it"
+        # Bound to the commit it claims to be. The summary presents this as *the*
+        # link to the work, so a stale or miswired one sends the user to somebody
+        # else's commit while everything else reports success.
+        #
+        # The host is deliberately not pinned to github.com: an enterprise
+        # connector serves a different one, and refusing that would break a
+        # legitimate deployment to catch a cosmetic mismatch. What must hold is
+        # that the link names this repository and ends at this commit.
+        repository = clean(plan.get("repository"))
+        if repository not in path:
+            return f"the commit URL does not name {repository!r}: {clean(args.commit_url)!r}"
+        tail = path.split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if not SHA_PATTERN.fullmatch(tail) or not same_sha(tail, args.commit_sha):
+            return (
+                f"the commit URL does not end at {clean(args.commit_sha)[:12]}: "
+                f"{clean(args.commit_url)!r}"
+            )
     return None
 
 
@@ -1508,8 +1550,22 @@ def main() -> int:
 
     p = subcommand("connector-record", help="record a connector write, if it is the approved one")
     p.add_argument("--facts", required=True)
-    p.add_argument("--blob-sha", required=True, help="the blob sha the connector stored")
+    p.add_argument(
+        "--blob-sha",
+        required=True,
+        help=(
+            f"the blob at {TARGET} in the NEW COMMIT's tree, read back -- not the sha the "
+            "create-blob call returned: a tree can reference a different blob than the one "
+            "just uploaded, and only the commit's own entry says what was published"
+        ),
+    )
     p.add_argument("--parent", required=True, metavar="SHA", help="the new commit's parent")
+    p.add_argument(
+        "--branch-head",
+        required=True,
+        metavar="SHA",
+        help="the branch's head AFTER the write; proves the ref update landed",
+    )
     p.add_argument(
         "--changed-path",
         action="append",

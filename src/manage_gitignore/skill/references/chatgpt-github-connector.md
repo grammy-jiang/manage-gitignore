@@ -83,21 +83,36 @@ overwritten. `connector-record` checks the result either way.
 
 ## Recording it
 
-Read the new commit back through the connector — its parent, its subject, and
-the paths it changed — then:
+Read the new commit back through the connector — its parent, its subject, the
+paths it changed, and the blob its tree records at `.gitignore` — and read the
+target branch's head again. Then:
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" connector-record \
-  --facts "<facts.json>" --blob-sha "<blob the connector stored>" \
+  --facts "<facts.json>" \
+  --blob-sha "<the .gitignore blob in the NEW COMMIT's tree>" \
   --parent "<the commit's parent>" --changed-path "<each path it changed>" \
-  --commit-sha "<new commit>" --repository "<owner/name>" \
-  --branch "<branch>" --subject "<the commit's subject>" \
-  --commit-url "<canonical URL>"
+  --commit-sha "<new commit>" --branch-head "<the branch's head now>" \
+  --repository "<owner/name>" --branch "<branch>" \
+  --subject "<the commit's subject>" --commit-url "<canonical URL>"
 ```
 
-Every value here is what GitHub says, read back after the write — not what you
-sent. Pass `--changed-path` once per path the commit actually changed, whatever
-they are, and `--subject` as GitHub reports it. Do not filter the list down to
+**Every value here is what GitHub says after the write, not what you sent.**
+Two of them are easy to get wrong in a way that defeats the check:
+
+- `--blob-sha` is the blob the **new commit's tree** records at `.gitignore` —
+  *not* the sha the create-blob call returned. Those are usually the same, and
+  when they are not it is exactly the case worth catching: the blob uploaded
+  fine and the tree referenced a different one, so the commit publishes content
+  this run never verified. The changed-path check cannot see that; it only says
+  the path changed.
+- `--branch-head` is the branch's head read again **after** the ref update.
+  Creating the commit and moving the branch are two separate calls, and only the
+  second publishes anything. If it was skipped, rejected, or aimed at another
+  ref, the commit still exists and every other field still matches.
+
+Pass `--changed-path` once per path the commit actually changed, whatever they
+are, and `--subject` as GitHub reports it. Do not filter the list down to
 `.gitignore` or retype the message from your own draft: comparing them is the
 point of passing them, and a value you have already corrected cannot fail.
 

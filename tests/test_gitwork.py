@@ -1222,6 +1222,7 @@ class TestConnectorTransport:
             "--blob-sha": blob,
             "--parent": self._head(repo),
             "--commit-sha": "4d5e6f7a8b9c",
+            "--branch-head": "4d5e6f7a8b9c",
             "--repository": self.REPOSITORY,
             "--branch": "main",
             "--subject": self.SUBJECT,
@@ -1354,21 +1355,25 @@ class TestConnectorTransport:
         """
         repo, facts = published
         assert self._plan(run_script, repo, facts).returncode == 0
+        # Escapes, not literals: this file is itself scanned for invisible
+        # characters by `test_no_tracked_file_carries_an_invisible_character`,
+        # which is the same rule the code under test is enforcing.
+        rlo, zwsp = "\u202e", "\u200b"
 
         out = self._record(
             run_script,
             repo,
             facts,
-            changed=[".gitignore", "evil\x1b[31m\nforged row‮​"],
+            changed=[".gitignore", f"evil\x1b[31m\nforged row{rlo}{zwsp}"],
         )
 
         assert out.returncode == 7
         for stream in (out.stderr, out.stdout):
             assert "\x1b" not in stream
-            assert "‮" not in stream
-            assert "​" not in stream
+            assert rlo not in stream
+            assert zwsp not in stream
         reason = json.loads(facts.read_text())["commit"]["push"]["reason"]
-        assert "\x1b" not in reason and "‮" not in reason
+        assert "\x1b" not in reason and rlo not in reason
 
     def test_a_tampered_plan_cannot_forge_a_refusal_message(self, published, run_script):
         """The plan is read back off a facts file on disk, so it is caller-
@@ -1427,7 +1432,11 @@ class TestConnectorTransport:
             run_script,
             repo,
             facts,
-            **{"--commit-url": "https://github.com/grammy-jiang/verify-compatibility/commit/4d5e"},
+            **{
+                "--commit-url": (
+                    "https://github.com/grammy-jiang/verify-compatibility/commit/4d5e6f7a8b9c"
+                )
+            },
         )
 
         assert out.returncode == 0, out.stderr
@@ -1474,6 +1483,25 @@ class TestConnectorTransport:
                 "carries credentials",
             ),
             ({"--commit-url": "http://github.com/o/r/commit/4d5"}, "is not https"),
+            # The ref update is a separate call from creating the commit, and
+            # only it publishes anything. A head that is not the new commit
+            # means the branch does not point at the work.
+            ({"--branch-head": "0" * 40}, "the ref update did not land"),
+            ({"--branch-head": "not-a-sha"}, "branch head is not a sha"),
+            # A URL naming the right repository but somebody else's commit.
+            (
+                {
+                    "--commit-url": (
+                        "https://github.com/grammy-jiang/verify-compatibility/commit/" + "0" * 40
+                    )
+                },
+                "does not end at",
+            ),
+            # A URL for the right commit in the wrong project.
+            (
+                {"--commit-url": "https://github.com/someone/elsewhere/commit/4d5e6f7a8b9c"},
+                "does not name",
+            ),
         ],
     )
     def test_a_write_that_is_not_the_approved_one_is_never_called_a_success(
