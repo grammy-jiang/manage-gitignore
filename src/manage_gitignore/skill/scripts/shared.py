@@ -274,6 +274,9 @@ class PushFacts(TypedDict, total=False):
 
 class CommitFacts(TypedDict, total=False):
     choice: str  # commit + push | commit only | not committed
+    status: str  # succeeded | failed | not created (connector routes)
+    sha: str  # remote commit sha in connector routes
+    url: str  # canonical remote commit URL
     hash: str
     subject: str
     scope: str
@@ -285,6 +288,13 @@ class NetFacts(TypedDict, total=False):
     prev_count: int
     new_count: int
     diffstat: str
+
+
+class PushOutcomeFacts(TypedDict, total=False):
+    status: str  # succeeded | failed | not attempted
+    repository: str  # owner/name
+    branch: str
+    reason: str
 
 
 class PushPlan(TypedDict, total=False):
@@ -354,12 +364,15 @@ FACTS_TOOL = "manage-gitignore"
 
 class Facts(TypedDict, total=False):
     tool: str
+    requested_action: str  # commit + push | commit only | not committed
+    transport: str  # local-git | chatgpt-github-connector | other
     scan: ScanFacts
     templates: TemplatesFacts
     merge: MergeFacts
     review: ReviewFacts
     write: WriteFacts
     commit: CommitFacts
+    push: PushOutcomeFacts
     net: NetFacts
     notes: list[str]
     internal: InternalFacts

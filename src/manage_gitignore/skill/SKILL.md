@@ -3,7 +3,6 @@ name: manage-gitignore
 description: Build a repository's .gitignore from gitignore.io, keeping the template block verbatim and the repo's own custom rules intact, then review the diff and — with confirmation — commit and push it. Use when asked to create, refresh, or replace a .gitignore, add ignore rules for a language / editor / OS, inspect an existing .gitignore, or "get a gitignore from gitignore.io".
 license: MIT
 compatibility: Needs python3 3.10 or newer, plus git and curl on PATH, and outbound HTTPS to gitignore.io. Writes only the .gitignore of the repository it is pointed at, plus temporary files outside it. Runs in any agent that reads the Agent Skills format.
-allowed-tools: Bash(python3:*) Bash(mktemp:*) Bash(rm:*) Read Write
 metadata:
   homepage: https://github.com/grammy-jiang/manage-gitignore
 ---
@@ -21,10 +20,8 @@ own every mechanical step — scanning, merging, verifying, all summary numbers,
 tracked-vs-untracked, the diff, the commit, and what a push may do.
 
 **Yours:** ask the user, judge their answers, write the commit message, relay
-what the tools say. That is all. Never re-derive a tool's answer by eye, never
-reformat its output into your own numbers, and never run `git add`/`commit`/`push`
-yourself — `scripts/gitwork.py` is the only path to a mutation, and it fails
-closed.
+what the tools say. That is all. Never re-derive a tool's answer by eye and
+never reformat its output into your own numbers.
 
 ## Placeholders
 
@@ -124,7 +121,7 @@ later**, outside the repo so it stays out of the diff being reviewed. A
 different path is refused, not silently merged into.
 
 You delete both temp files once each command returns: `rm -f "<templates.txt>"`,
-and `rm -f "<msgfile>"` after Step 4. The tools never unlink their inputs.
+and `rm -f "<msgfile>"` after Step 5. The tools never unlink their inputs.
 
 The tool verifies its own write before reporting success — block intact, template
 set exact, every custom rule present, no ANSI, bidi or zero-width characters.
@@ -139,7 +136,7 @@ set exact, every custom rule present, no ANSI, bidi or zero-width characters.
   "this file should be gone", and no rebuild honours that. Relay it and stop.
   They finish the deletion or unstage it; then the run starts again from Step 1.
 - **anything else** — nothing usable was written. Report it and end the run: no
-  Step 4, and no Step 5 summary for a run that produced no file.
+  Step 4, and no Step 6 summary for a run that produced no file.
 
 On success relay its report: custom rules kept, each duplicate dropped with the
 template that covers it, and any `Review before committing` lines — negations
@@ -152,9 +149,27 @@ rules**, so their absence certifies nothing about the rest of the diff.
 file on disk is then deliberately not what will be committed.
 
 Otherwise: do not diff the file by hand and do not describe it as the change.
-Step 4's `status` reports the committed version, and it is the one to show.
+Step 5's `status` reports the committed version, and it is the one to show.
 
-## Step 4 — Review, commit, push (`.gitignore` ONLY)
+## Step 4 — Select the GitHub transport
+
+Read host-provided runtime/product context first. Do **not** invent a shell flag
+like `CHATGPT=1`, and do **not** infer ChatGPT from local `git`, tokens, or files.
+
+- If host context says ChatGPT / ChatGPT Work / ChatGPT web-desktop-mobile:
+  1. Discover GitHub connector tools by capability and provenance (`@GitHub`),
+     not by one generated MCP name.
+  2. Confirm the connector with a harmless repository read call for the exact
+     target repository.
+  3. Require repository push permission before offering **Commit + push**.
+  4. If connector lookup fails, needs connection, or lacks push permission:
+     ask the user to install/select/connect `@GitHub`, then stop. **Do not**
+     fall back to unauthenticated shell Git.
+  5. Follow [references/chatgpt-github-connector.md](references/chatgpt-github-connector.md).
+- Otherwise (non-ChatGPT host): use the local Git path below and
+  [references/local-git.md](references/local-git.md).
+
+## Step 5 — Local-git review, commit, push (`.gitignore` ONLY)
 
 Never stage, commit, or suggest committing any other file — and never another
 change to this one. Step 3 refuses to start from a `.gitignore` that already
@@ -177,7 +192,7 @@ the file itself too (your file-read tool, or `cat`); on a first run the Step 3
 flags are otherwise the only review surface. If `suspicious_characters` is true,
 say so: the terminal may not be rendering what the file says.
 
-If `skip_reason` is not null, the rest of Step 4 does not apply: go to Step 5
+If `skip_reason` is not null, the rest of Step 5 does not apply: go to Step 6
 with `--note "<skip_reason>"` and no `--hash`.
 
 Read the diff for what *the user* should weigh — a flagged negation, a broad
@@ -224,11 +239,11 @@ verified*.
 
 **Read `verdict`:**
 
-- `ok` — keep the returned `hash` for Step 5.
+- `ok` — keep the returned `hash` for Step 6.
 - anything else — **do not push.** Relay its `remedy`; **never run it yourself**
   — discarding a commit that exists is the user's call. It has already written
-  the outcome into the facts file, so Step 5 needs nothing extra from you. Do
-  not pass the hash to Step 5.
+  the outcome into the facts file, so Step 6 needs nothing extra from you. Do
+  not pass the hash to Step 6.
 
 A non-zero exit with no verdict means nothing was committed and the index is as
 you found it. Report it and stop.
@@ -241,7 +256,7 @@ Only if the user chose a push option.
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" push-plan
 ```
 
-- `permits_push: false` → report `guidance` and go to Step 5. None of these is an
+- `permits_push: false` → report `guidance` and go to Step 6. None of these is an
   error to fix; `stop-up-to-date` is a success.
 - `action: "diverged"` → [references/push-safety.md](references/push-safety.md).
   Keep `upstream_sha`; the force needs it.
@@ -260,10 +275,10 @@ needs one more question: show each candidate **with its URL** from `remote_urls`
 then pass `--remote`.
 
 **A push that did not happen appears two ways** — JSON with `pushed: false`, or a
-non-zero exit with no JSON. Treat both the same: report it, and go to Step 5 with
+non-zero exit with no JSON. Treat both the same: report it, and go to Step 6 with
 no push recorded.
 
-## Step 5 — Summary
+## Step 6 — Summary
 
 ```bash
 python3 "<skill-dir>/scripts/gitwork.py" --dir "<repo>" facts --facts "<facts.json>" \
@@ -278,9 +293,15 @@ no choice for you to work out, and nothing to say when the run went normally.
 Pass only what the tools cannot know:
 
 - `--hash` — only when `verdict` was `ok`. It is verified, not believed.
-- `--note` — only to carry a reason: a `skip_reason` from Step 4 item 1, the
+- `--note` — only to carry a reason: a `skip_reason` from Step 5 item 1, the
   `guidance` from a plan that did not permit a push, or the error text from a
   push that failed. It repeats, and appends without touching computed fields.
+- In ChatGPT connector mode also pass:
+  - `--requested-action` (the exact user choice),
+  - `--transport chatgpt-github-connector`,
+  - connector outcomes (`--commit-status`, `--commit-sha`, `--commit-url`,
+    `--push-status`, `--push-repository`, `--push-branch`, `--push-reason`).
+  This preserves requested action and actual outcomes as separate facts.
 
 Never hand-edit the file.
 
@@ -303,6 +324,8 @@ That output *is* the closing summary; do not hand-format a second one. Then
   If the API is unreachable, say so; do not fake it.
 - Never run `git add`/`commit`/`push` yourself. `scripts/gitwork.py` is the only
   path to a mutation, and it fails closed.
+- In ChatGPT connector mode, `scripts/gitwork.py commit` and `push` are **not**
+  used for **Commit + push**. Use the connected `@GitHub` tools instead.
 - This skill modifies and commits **only** `.gitignore`, and within it only the
   change this run made.
 - Commit messages go through a file and `--message-file`. Never a heredoc or

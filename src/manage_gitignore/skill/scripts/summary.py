@@ -20,6 +20,8 @@ bug worth surfacing, not one to paper over.
 FACTS schema (all fields optional; sections with no data are skipped):
 {
   "title": "manage-gitignore - run summary",
+  "requested_action": "commit + push",
+  "transport": "local-git|chatgpt-github-connector",
   "scan":   {"git_repo": true, "gitignore": "existing|none",
              "prev_templates_count": 11, "custom_lines": 0,
              "detected": ["node (scripts/lint-mermaid.mjs)"]},
@@ -34,9 +36,14 @@ FACTS schema (all fields optional; sections with no data are skipped):
   "review": {"negations": ["!*.svg"], "broad": ["*"]},
   "write":  {"path": ".gitignore", "mode": "overwrite|new", "reason": "file existed"},
   "commit": {"choice": "commit + push|commit only|not committed",
+             "status": "succeeded|failed|not created",
+             "sha": "6e0a827", "url": "https://github.com/o/r/commit/...",
              "hash": "6e0a827", "subject": "chore: ...",
              "scope": ".gitignore only", "untouched": "4 staged files",
              "push": {"sha": "6e0a827", "remote": "origin", "branch": "main"}},
+  "push":   {"status": "succeeded|failed|not attempted",
+             "repository": "owner/name", "branch": "main",
+             "reason": "branch moved before ref update"},
   "net":    {"prev_count": 11, "new_count": 12,
              "diffstat": "1 file changed, 7 insertions(+), 3 deletions(-)"},
   "notes":  ["free-form context shown near the top, e.g. a pre-run history reset"]
@@ -309,8 +316,28 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # One default, used by both the row and the push gate below: two
         # fallbacks drifting apart produced a self-contradictory summary.
         choice = clean(commit.get("choice", "not committed"))
-        rows = [("choice", choice)]
-        if commit.get("hash"):
+        rows = []
+        requested = facts.get("requested_action")
+        if requested:
+            rows.append(("requested", clean(requested)))
+        transport = facts.get("transport")
+        if transport:
+            rows.append(("transport", clean(transport)))
+        rows.append(("choice", choice))
+        if commit.get("status"):
+            status = clean(commit.get("status", ""))
+            detail = "  ".join(
+                [
+                    x
+                    for x in [
+                        pal.hashc(clean(commit.get("sha", ""))) if commit.get("sha") else "",
+                        clean(commit.get("url", "")) if commit.get("url") else "",
+                    ]
+                    if x
+                ]
+            )
+            rows.append(("commit", f"{status} — {detail}" if detail else status))
+        elif commit.get("hash"):
             subj = clean(commit.get("subject", ""))
             rows.append(("commit", f"{pal.hashc(clean(commit['hash']))}  {subj}"))
         if commit.get("scope"):
@@ -319,19 +346,36 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
             if untouched:
                 scope += f"  {pal.dim(f'({clean(untouched)} untouched)')}"
             rows.append(("scope", scope))
-        # Only meaningful once something was committed: "not pushed" under
-        # choice "not committed" reads as a failure rather than a non-event.
-        if choice != "not committed":
-            push = commit.get("push")
-            if push:
-                where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"
-                pushed = f"{pal.hashc(clean(push.get('sha', '')))} \u2192 {where}"
+        push_outcome = facts.get("push") or {}
+        # Legacy shape: hide "not pushed" under "not committed". Connector
+        # outcomes may still need an explicit push line on the same choice.
+        if choice != "not committed" or push_outcome.get("status"):
+            if push_outcome.get("status"):
+                status = clean(push_outcome.get("status", ""))
+                where = "/".join(
+                    [
+                        x
+                        for x in [
+                            clean(push_outcome.get("repository", "")),
+                            clean(push_outcome.get("branch", "")),
+                        ]
+                        if x
+                    ]
+                )
+                reason = clean(push_outcome.get("reason", "")) if push_outcome.get("reason") else ""
+                suffix = where or reason
+                pushed = f"{status} — {suffix}" if suffix else status
             else:
-                pushed = pal.dim("not pushed")
-                if notes:
-                    # The explanation lives in NOTES; point at it from the row
-                    # it explains rather than leaving the reader to connect them.
-                    pushed += pal.dim(" — see NOTES")
+                push = commit.get("push")
+                if push:
+                    where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"
+                    pushed = f"{pal.hashc(clean(push.get('sha', '')))} \u2192 {where}"
+                else:
+                    pushed = pal.dim("not pushed")
+                    if notes:
+                        # The explanation lives in NOTES; point at it from the row
+                        # it explains rather than leaving the reader to connect them.
+                        pushed += pal.dim(" — see NOTES")
             rows.append(("push", pushed))
         emit_section(lines, "COMMIT", rows, pal)
 

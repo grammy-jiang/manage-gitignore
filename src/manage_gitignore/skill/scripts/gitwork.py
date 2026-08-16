@@ -1090,8 +1090,29 @@ def cmd_facts(args: argparse.Namespace) -> int:
         # Appended through the tool so the rest of the file is never rewritten by
         # hand -- a hand-merge is how computed fields get dropped.
         append_notes(facts, args.note)
+    if args.requested_action:
+        facts["requested_action"] = args.requested_action
+    if args.transport:
+        facts["transport"] = args.transport
     facts.setdefault("scan", {})["git_repo"] = is_repo(repo)
     commit = facts.setdefault("commit", {})
+    if args.commit_status:
+        commit["status"] = args.commit_status
+    if args.commit_sha:
+        commit["sha"] = args.commit_sha
+    if args.commit_url:
+        commit["url"] = args.commit_url
+    push = facts.setdefault("push", {})
+    if args.push_status:
+        push["status"] = args.push_status
+    if args.push_repository:
+        push["repository"] = args.push_repository
+    if args.push_branch:
+        push["branch"] = args.push_branch
+    if args.push_reason:
+        push["reason"] = args.push_reason
+    if not push:
+        facts.pop("push", None)
     if args.choice:
         commit["choice"] = args.choice
     if is_repo(repo):
@@ -1196,10 +1217,31 @@ def main() -> int:
     )
     p.add_argument("--hash", help="the commit this run produced (verified, not trusted)")
     p.add_argument(
+        "--requested-action",
+        choices=("commit + push", "commit only", "not committed"),
+        help="what the user asked for, recorded separately from outcomes",
+    )
+    p.add_argument("--transport", help="how commit/push was executed, e.g. local-git")
+    p.add_argument(
         "--choice",
         choices=("commit + push", "commit only", "not committed"),
         help="override the outcome derived from what the run recorded",
     )
+    p.add_argument(
+        "--commit-status",
+        choices=("succeeded", "failed", "not created"),
+        help="explicit commit outcome status (used by non-local transports)",
+    )
+    p.add_argument("--commit-sha", help="commit sha reported by the active transport")
+    p.add_argument("--commit-url", help="canonical commit URL reported by the transport")
+    p.add_argument(
+        "--push-status",
+        choices=("succeeded", "failed", "not attempted"),
+        help="explicit push outcome status (used by non-local transports)",
+    )
+    p.add_argument("--push-repository", help="push destination repository (owner/name)")
+    p.add_argument("--push-branch", help="push destination branch")
+    p.add_argument("--push-reason", help="reason for failed/not-attempted push")
 
     args = parser.parse_args()
     if not os.path.isdir(args.dir):

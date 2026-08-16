@@ -952,6 +952,57 @@ class TestPush:
 
 # ── facts ───────────────────────────────────────────────────────────────────
 class TestFacts:
+    def test_records_requested_action_and_transport(self, repo, run_script, facts_file):
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "facts",
+            "--facts",
+            str(facts_file),
+            "--requested-action",
+            "commit + push",
+            "--transport",
+            "chatgpt-github-connector",
+        )
+        assert out.returncode == 0, out.stderr
+        facts = json.loads(facts_file.read_text())
+        assert facts["requested_action"] == "commit + push"
+        assert facts["transport"] == "chatgpt-github-connector"
+
+    def test_records_connector_commit_and_push_outcomes(self, repo, run_script, facts_file):
+        out = run_script(
+            "gitwork.py",
+            "--dir",
+            str(repo),
+            "facts",
+            "--facts",
+            str(facts_file),
+            "--commit-status",
+            "succeeded",
+            "--commit-sha",
+            "726bc13",
+            "--commit-url",
+            "https://github.com/o/r/commit/726bc13",
+            "--push-status",
+            "failed",
+            "--push-repository",
+            "grammy-jiang/verify-compatibility",
+            "--push-branch",
+            "master",
+            "--push-reason",
+            "branch moved before the ref update",
+        )
+        assert out.returncode == 0, out.stderr
+        facts = json.loads(facts_file.read_text())
+        assert facts["commit"]["status"] == "succeeded"
+        assert facts["commit"]["sha"] == "726bc13"
+        assert facts["commit"]["url"] == "https://github.com/o/r/commit/726bc13"
+        assert facts["push"]["status"] == "failed"
+        assert facts["push"]["repository"] == "grammy-jiang/verify-compatibility"
+        assert facts["push"]["branch"] == "master"
+        assert facts["push"]["reason"] == "branch moved before the ref update"
+
     def test_the_choice_is_recorded_even_without_a_repo(self, plain_dir, run_script, facts_file):
         """The choice is the user's answer, not a repository fact."""
         out = run_script(

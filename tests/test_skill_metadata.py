@@ -81,14 +81,17 @@ class TestFrontmatterFollowsTheSpec:
         assert isinstance(compatibility, str)
         assert len(compatibility) <= 500
 
-    def test_allowed_tools_is_a_string_not_a_list(self):
+    def test_allowed_tools_when_present_is_a_string_not_a_list(self):
         """The spec says space-separated string.
 
         Defect this pins: it was a YAML list, which Claude Code accepts and the
         spec does not describe -- the kind of difference that works everywhere
         it is tested and fails on the one product nobody tried.
         """
-        assert isinstance(frontmatter()["allowed-tools"], str)
+        allowed = frontmatter().get("allowed-tools")
+        if allowed is None:
+            return
+        assert isinstance(allowed, str)
 
     def test_metadata_is_a_map_of_strings(self):
         metadata = frontmatter().get("metadata")
@@ -107,12 +110,18 @@ class TestAllowedToolsMatchesWhatTheSkillPermits:
         """SKILL.md forbids running git directly; scripts/gitwork.py is the only
         path to a mutation. Pre-approving `git` would hand the agent the very
         thing the procedure exists to keep out of its hands."""
-        assert "Bash(git" not in frontmatter()["allowed-tools"]
+        allowed = frontmatter().get("allowed-tools")
+        if allowed is None:
+            return
+        assert "Bash(git" not in allowed
 
     def test_bash_is_not_pre_approved_wholesale(self):
         """Defect this pins: `allowed-tools` listed bare `Bash`, which grants
         every command there is -- broader than the handful the procedure runs."""
-        granted = str(frontmatter()["allowed-tools"]).split()
+        allowed = frontmatter().get("allowed-tools")
+        if allowed is None:
+            return
+        granted = str(allowed).split()
         assert "Bash" not in granted
 
 
@@ -156,6 +165,20 @@ class TestNothingIsWrittenForOneAgentOnly:
             and "Claude Code" not in path.read_text(encoding="utf-8")
         ]
         assert offenders == []
+
+
+class TestChatGptConnectorRouting:
+    def test_skill_routes_chatgpt_to_the_github_connector(self):
+        body = (cli.skill_source() / "SKILL.md").read_text(encoding="utf-8")
+        assert "ChatGPT / ChatGPT Work" in body
+        assert "@GitHub" in body
+        assert "fall back to unauthenticated shell Git" in body
+        assert "chatgpt-github-connector" in body
+
+    def test_connector_and_local_references_exist(self):
+        root = cli.skill_source() / "references"
+        assert (root / "chatgpt-github-connector.md").is_file()
+        assert (root / "local-git.md").is_file()
 
     def test_no_file_calls_a_subcommand_that_no_longer_exists(self):
         """Defect this pins: `references/push-safety.md` told the agent to run

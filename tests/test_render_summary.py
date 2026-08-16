@@ -388,6 +388,34 @@ class TestAlignment:
 
 # ── colour ──────────────────────────────────────────────────────────────────
 class TestCommitAndPushRows:
+    def test_requested_action_and_transport_are_shown_when_present(self):
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "transport": "chatgpt-github-connector",
+                "commit": {"choice": "commit only"},
+            }
+        )
+        assert "requested" in out and "commit + push" in out
+        assert "transport" in out and "chatgpt-github-connector" in out
+
+    def test_connector_commit_and_push_outcomes_render_separately(self):
+        out = render(
+            {
+                "requested_action": "commit + push",
+                "transport": "chatgpt-github-connector",
+                "commit": {
+                    "choice": "not committed",
+                    "status": "not created",
+                },
+                "push": {"status": "failed", "reason": "branch moved before the ref update"},
+            }
+        )
+        assert "requested  commit + push" in out
+        assert "transport  chatgpt-github-connector" in out
+        assert "commit     not created" in out
+        assert "push       failed — branch moved before the ref update" in out
+
     def test_push_is_composed_from_its_pieces(self):
         out = render(FULL_FACTS)
         assert "6e0a827 → origin/main" in out
