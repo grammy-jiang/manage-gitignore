@@ -1160,6 +1160,47 @@ class TestAPushThatDidNotHappenIsStillRecorded:
         assert json.loads(facts_file.read_text())["commit"]["push"] == landed
         assert remote_head(bare) == git(work, "rev-parse", "HEAD").stdout.strip()
 
+    def test_a_retry_after_someone_else_advanced_the_branch_keeps_the_record(
+        self, remote_pair, clone_of, run_script, tmp_path, facts_file
+    ):
+        """The same defect through a different plan, raised in review of #57
+        after the first fix guarded only `stop-up-to-date`.
+
+        Our push lands; another actor then pushes a descendant; a retry is now
+        `stop-behind-only`. The commit is still in the remote's history, so
+        recording "not attempted" over the success would be just as wrong.
+
+        Which is why the guard is on the *status* rather than on a list of
+        actions -- every action left off such a list is this bug again, and
+        `diverged` after a force elsewhere would have been the next one.
+        """
+        work, bare = remote_pair
+        write_gitignore(work)
+        git(work, "add", ".gitignore")
+        git(work, "commit", "-qm", "chore: refresh .gitignore")
+        assert (
+            run_script(
+                "gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file)
+            ).returncode
+            == 0
+        )
+        landed = json.loads(facts_file.read_text())["commit"]["push"]
+        ours = git(work, "rev-parse", "HEAD").stdout.strip()
+
+        other = clone_of(bare, tmp_path / "other")
+        (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "theirs")
+        git(other, "push", "-q", "origin", "main")
+
+        retry = run_script("gitwork.py", "--dir", str(work), "push", "--facts", str(facts_file))
+
+        assert json.loads(retry.stdout)["action"] == "stop-behind-only"
+        assert json.loads(facts_file.read_text())["commit"]["push"] == landed
+        # And the commit really is still published, which is what makes the
+        # preserved record true rather than merely convenient.
+        assert git(other, "merge-base", "--is-ancestor", ours, "origin/main").returncode == 0
+
     def test_a_facts_file_from_another_repo_stops_the_push_before_it_happens(
         self, remote_pair, run_script, tmp_path
     ):

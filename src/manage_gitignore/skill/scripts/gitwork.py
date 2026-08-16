@@ -937,6 +937,15 @@ def record_push(
     if not args.facts:
         return
     facts = load_facts(args.facts, getattr(args, "dir", None))
+    # A refusal cannot undo a push that already landed. The plan describes the
+    # repository as it is *now*, and a retry sees a different one: our own landed
+    # push makes it `stop-up-to-date`, another actor advancing the branch makes
+    # it `stop-behind-only`, a force elsewhere makes it `diverged`. None of those
+    # says anything about what this run did. Only an attempt can replace the
+    # record of an attempt -- which is why the guard is on the status and not on
+    # a list of actions, where every one left off would be this bug again.
+    if status == "not attempted" and ((facts.get("commit") or {}).get("push") or {}).get("sha"):
+        return
     ref = plan.get("merge_ref") or plan.get("branch") or ""
     # removeprefix, not rsplit: "refs/heads/feature/foo" is the branch
     # "feature/foo", and splitting on the last slash would call it "foo".
@@ -952,19 +961,6 @@ def record_push(
         record["reason"] = reason
     facts.setdefault("commit", {})["push"] = record
     save_facts(args.facts, facts)
-
-
-def recorded_push_sha(args: argparse.Namespace) -> str:
-    """The sha of a push already written into this run's facts, if there is one.
-
-    Only a landed push produces a sha, so this is the question "did an earlier
-    invocation of `push` in this run succeed" -- which is not the same as what
-    the plan says now.
-    """
-    if not args.facts:
-        return ""
-    facts = load_facts(args.facts, getattr(args, "dir", None))
-    return str(((facts.get("commit") or {}).get("push") or {}).get("sha") or "")
 
 
 def cmd_push(args: argparse.Namespace) -> int:
@@ -994,15 +990,10 @@ def cmd_push(args: argparse.Namespace) -> int:
         die(message)
 
     if action.startswith("stop-"):
-        # A retry after a push that already landed: `stop-up-to-date` means the
-        # remote has HEAD, so a successful record from the earlier invocation is
-        # still true. Overwriting it would turn a push that happened into "not
-        # pushed" -- the same lie this file exists to prevent, pointing the
-        # other way. Nothing new to record, so record nothing.
-        if not (action == "stop-up-to-date" and recorded_push_sha(args)):
-            record_push(
-                args, plan, status="not attempted", reason=str(plan.get("guidance") or action)
-            )
+        # `record_push` declines to overwrite a landed push with a refusal, so a
+        # retry after this run already pushed keeps its record whichever stop-*
+        # the current state produces.
+        record_push(args, plan, status="not attempted", reason=str(plan.get("guidance") or action))
         emit({**plan, "pushed": False})
         print(f"gitwork: not pushing ({action})", file=sys.stderr)
         return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
