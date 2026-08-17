@@ -61,20 +61,20 @@ Issues = "https://github.com/grammy-jiang/manage-gitignore/issues"
 # library (tests/test_cli.py), so no user's environment is constrained by any
 # of this.
 dev = [
-    "pytest==9.0.1",
-    "pytest-cov==7.0.0",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
     "pytest-xdist==3.8.0",
     # ruff was pinned before the rest, and for an additional reason:
     # .pre-commit-config.yaml names an exact ruff, and a hook that formats
     # differently from the gate is worse than no hook. The two move together or
     # not at all.
     "ruff==0.16.2",
-    "mypy==1.19.0",
+    "mypy==2.3.0",
     # PyYAML is a *test* dependency only: SKILL.md's frontmatter is a contract
     # with three products that each parse it with a real YAML parser, so the
     # test holding it to the Agent Skills spec must parse it the same way.
     "pyyaml==6.0.3",
-    "types-PyYAML==6.0.12.20250915",
+    "types-PyYAML==6.0.12.20260724",
     # tests/test_merge_properties.py states the merge's invariants and lets
     # Hypothesis look for a counterexample. Test-only, like PyYAML.
     "hypothesis==6.165.3",
@@ -89,7 +89,7 @@ dev = [
     # Installed by the hooks job rather than named inline in the workflow. A
     # version pinned in a `run:` step is one Dependabot cannot see, which is the
     # stale-pin problem dependabot.yml warns about for pre-commit's own revs.
-    "pre-commit==4.6.0",
+    "pre-commit==4.6.1",
 ]
 
 [project.scripts]
