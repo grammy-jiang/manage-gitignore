@@ -30,12 +30,13 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NoReturn, cast
 
 from shared import (
     FACTS_TOOL,
     Facts,
+    PushFacts,
     PushPlan,
     atomic_write_bytes,
     clean,
@@ -344,14 +345,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ── commit ──────────────────────────────────────────────────────────────────
-def safe_token(value: str, what: str) -> str:
+def safe_token(value: str, what: str, on_refusal: Callable[[str], NoReturn] = die) -> str:
     """Reject a remote/branch git would read as an option.
 
     These come from repository config, which a checked-out repo can set: a
     remote literally named "--upload-pack=..." would otherwise reach `git push`
     as a flag.
+
+    `on_refusal` exists so the push path can write down what it refused before
+    stopping. Defaulting to `die` keeps every other caller unchanged.
     """
-    return refuse_option_like(value, what, die)
+    return refuse_option_like(value, what, on_refusal)
 
 
 def safe_ref(ref: str) -> str:
@@ -392,16 +396,18 @@ def remote_push_url(repo: str, name: str) -> str:
     return url
 
 
-def safe_merge_ref(ref: str) -> str:
+def safe_merge_ref(ref: str, on_refusal: Callable[[str], NoReturn] = die) -> str:
     """A branch ref from repo config, shape-checked before it builds a refspec.
 
     merge_ref is interpolated into `HEAD:<ref>` and into a --force-with-lease
     argument. A ':' or a leading '+' there would change what the push means, and
     the value comes from branch.<name>.merge, which a checked-out repo controls.
+
+    `on_refusal` as in safe_token: the push path records before it stops.
     """
-    refuse_option_like(ref, "upstream ref", die)
+    refuse_option_like(ref, "upstream ref", on_refusal)
     if not re.fullmatch(r"refs/heads/[^:\s+][^:\s]*", ref):
-        die(f"refusing upstream ref of unexpected shape: {ref!r}")
+        on_refusal(f"refusing upstream ref of unexpected shape: {ref!r}")
     return ref
 
 
@@ -903,25 +909,69 @@ def cmd_push_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def record_push(args: argparse.Namespace, plan: PushPlan, sha: str) -> None:
-    """Store where the push landed, from verified state -- never from free text.
+def record_push(
+    args: argparse.Namespace,
+    plan: PushPlan,
+    *,
+    status: str,
+    sha: str = "",
+    reason: str = "",
+) -> None:
+    """Store how far the push got, from verified state -- never from free text.
 
-    Kept as its three pieces rather than a sentence: render_summary owns every
-    display string, exactly as it does for the commit hash and subject.
+    Kept as its pieces rather than a sentence: render_summary owns every display
+    string, exactly as it does for the commit hash and subject.
+
+    Called *before* each push as well as after it. `git(..., check=True)` dies on
+    a push the remote rejects, so a record written only on success is no record
+    at all for the outcome the user most needs to see: the facts document said
+    nothing, `cmd_facts` therefore derived "commit only", and a requested
+    "commit + push" was reported as a run where no push had ever been wanted.
+    Writing `attempted` first leaves the truth on disk whichever way the command
+    ends, and the success path overwrites it with the sha.
+
+    The refusal legs record too, with the plan's own words as `reason`. `remote`
+    is optional here for the same reason: an ambiguous-remote refusal happens
+    precisely because there is no settled remote to name.
     """
     if not args.facts:
         return
     facts = load_facts(args.facts, getattr(args, "dir", None))
+    # A refusal cannot undo a push that already landed. The plan describes the
+    # repository as it is *now*, and a retry sees a different one: our own landed
+    # push makes it `stop-up-to-date`, another actor advancing the branch makes
+    # it `stop-behind-only`, a force elsewhere makes it `diverged`. None of those
+    # says anything about what this run did. Only an attempt can replace the
+    # record of an attempt -- which is why the guard is on the status and not on
+    # a list of actions, where every one left off would be this bug again.
+    #
+    # `attempted` deliberately still overwrites, and review argued it should not:
+    # a second push of a SECOND commit, rejected, would replace a landed record
+    # while the first commit is still on the remote. Declined, twice over. The
+    # procedure makes one commit and at most one push -- push-safety's force is
+    # the alternative to that push, not an extra one -- so reaching it means the
+    # agent has left the procedure, and the document is no longer describing the
+    # run it claims to. And the proposed test, "is the recorded sha still in the
+    # upstream history", needs a git call on the pre-push write path plus a fetch
+    # to be current; against a stale tracking ref it would assert `pushed` for a
+    # sha a force had already removed. That is the same class of error in the
+    # more dangerous direction. Revisit if this skill ever pushes twice.
+    if status == "not attempted" and ((facts.get("commit") or {}).get("push") or {}).get("sha"):
+        return
     ref = plan.get("merge_ref") or plan.get("branch") or ""
     # removeprefix, not rsplit: "refs/heads/feature/foo" is the branch
     # "feature/foo", and splitting on the last slash would call it "foo".
     branch = ref.removeprefix("refs/heads/")
-    facts.setdefault("commit", {})["push"] = {
-        "sha": sha,
-        # A push only happens once a remote is settled, so this is never null here.
-        "remote": str(plan["remote"]),
-        "branch": branch,
-    }
+    record: PushFacts = {"status": status}
+    if sha:
+        record["sha"] = sha
+    if plan.get("remote"):
+        record["remote"] = str(plan["remote"])
+    if branch:
+        record["branch"] = branch
+    if reason:
+        record["reason"] = reason
+    facts.setdefault("commit", {})["push"] = record
     save_facts(args.facts, facts)
 
 
@@ -936,23 +986,51 @@ def cmd_push(args: argparse.Namespace) -> int:
     plan = describe(push_plan(repo))
     action = plan["action"]
 
+    def refuse_before_push(message: str) -> NoReturn:
+        """Write down a refusal the argument guards made, then stop.
+
+        Those guards run before git, so nothing was attempted -- but every other
+        non-zero exit from here leaves a record saying which of the two outcomes
+        it was, and SKILL.md tells the agent so. Without this, a preflight
+        refusal is the one path that leaves nothing behind, and it would be
+        reported as a push the remote rejected.
+        """
+        reason = clean(message)
+        if len(reason) > MAX_ERR_LEN:  # as git's own stderr is bounded
+            reason = reason[:MAX_ERR_LEN] + " …(truncated)"
+        record_push(args, plan, status="not attempted", reason=reason)
+        die(message)
+
     if action.startswith("stop-"):
+        # `record_push` declines to overwrite a landed push with a refusal, so a
+        # retry after this run already pushed keeps its record whichever stop-*
+        # the current state produces.
+        record_push(args, plan, status="not attempted", reason=str(plan.get("guidance") or action))
         emit({**plan, "pushed": False})
         print(f"gitwork: not pushing ({action})", file=sys.stderr)
         return 0 if action == "stop-up-to-date" else EXIT_NOT_PUSHED
 
     if action == "fast-forward":
+        # Validated before the record, not inline in the git() call. These values
+        # come from the repository's own config, so either guard can refuse one,
+        # and refusing after the record would leave `attempted` on disk for a
+        # push git never ran -- reported as a push that failed. `attempted` has
+        # to keep meaning "git ran and did not come back".
+        #
+        # The reachable case is `branch.<name>.merge` set TWICE: git's own ref
+        # resolution uses the first value, so `@{u}` still resolves and the plan
+        # is a fast-forward, while `git config --get` -- what push_plan calls --
+        # returns the last. A dash-prefixed *remote* cannot get here; git will
+        # not resolve `@{u}` through one, and the no-upstream leg filters them.
+        remote_arg = safe_token(str(plan["remote"]), "remote", refuse_before_push)
+        merge_arg = safe_merge_ref(plan["merge_ref"], refuse_before_push)
+        # Recorded before git runs, not only after -- see record_push.
+        record_push(args, plan, status="attempted")
         # Explicit refspec: under push.default=matching a bare `git push` would
         # push every matching branch, not just this one.
-        git(
-            repo,
-            "push",
-            safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
-            check=True,
-        )
+        git(repo, "push", remote_arg, f"HEAD:{merge_arg}", check=True)
         sha = current_short_sha(repo)
-        record_push(args, plan, sha)
+        record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": False})
         return 0
 
@@ -961,6 +1039,9 @@ def cmd_push(args: argparse.Namespace) -> int:
         # parse stderr to find out what happened.
         remote = args.remote or plan["remote"]
         if not remote:
+            record_push(
+                args, plan, status="not attempted", reason="several remotes; none was chosen"
+            )
             emit({**plan, "pushed": False, "error": "ambiguous-remote"})
             names = ", ".join(clean(r) for r in plan["remotes"])
             warn = (
@@ -974,6 +1055,12 @@ def cmd_push(args: argparse.Namespace) -> int:
             )
             return EXIT_REMOTE_CHOICE
         if remote not in plan["remotes"]:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason=f"unknown remote {clean(remote)!r}",
+            )
             emit({**plan, "pushed": False, "error": "unknown-remote"})
             names = ", ".join(clean(r) for r in plan["remotes"])
             print(
@@ -981,21 +1068,27 @@ def cmd_push(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_REMOTE_CHOICE
-        git(
-            repo,
-            "push",
-            "-u",
-            safe_token(remote, "remote"),
-            safe_token(str(plan["branch"]), "branch"),
-            check=True,
-        )
+        # Annotated: a dict display is checked against PushPlan in place, but
+        # binding it to a bare name first widens it to dict[str, object].
+        chosen: PushPlan = {**plan, "remote": remote}
+        # Validated before the record, as on the fast-forward leg above.
+        remote_arg = safe_token(remote, "remote", refuse_before_push)
+        branch_arg = safe_token(str(plan["branch"]), "branch", refuse_before_push)
+        record_push(args, chosen, status="attempted")
+        git(repo, "push", "-u", remote_arg, branch_arg, check=True)
         sha = current_short_sha(repo)
-        record_push(args, {**plan, "remote": remote}, sha)
+        record_push(args, chosen, status="pushed", sha=sha)
         emit({**plan, "remote": remote, "pushed": True, "forced": False})
         return 0
 
     if action == "diverged":
         if not args.confirm_force:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason=f"branch has diverged; a force would drop {plan['behind']} remote commit(s)",
+            )
             emit({**plan, "pushed": False})
             print(
                 "gitwork: branch has diverged -- a force-push would DROP "
@@ -1010,6 +1103,12 @@ def cmd_push(args: argparse.Namespace) -> int:
         # precisely what the lease is supposed to prevent. Lease explicitly
         # against the sha whose consequences were shown and approved.
         if not args.expect_remote:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason="a force needs the approved --expect-remote sha",
+            )
             emit({**plan, "pushed": False, "error": "missing-expect-remote"})
             print(
                 "gitwork: --confirm-force also requires --expect-remote <sha>, the "
@@ -1020,6 +1119,12 @@ def cmd_push(args: argparse.Namespace) -> int:
             )
             return EXIT_NEEDS_EXPECT
         if args.expect_remote != plan["upstream_sha"]:
+            record_push(
+                args,
+                plan,
+                status="not attempted",
+                reason="the remote moved since that plan was approved",
+            )
             emit({**plan, "pushed": False, "error": "remote-moved"})
             print(
                 f"gitwork: the remote moved since that plan was made "
@@ -1029,16 +1134,14 @@ def cmd_push(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_NEEDS_FORCE
-        git(
-            repo,
-            "push",
-            f"--force-with-lease={safe_merge_ref(plan['merge_ref'])}:{safe_ref(args.expect_remote)}",
-            safe_token(str(plan["remote"]), "remote"),
-            f"HEAD:{safe_merge_ref(plan['merge_ref'])}",
-            check=True,
-        )
+        # Validated before the record, as on the two legs above.
+        merge_arg = safe_merge_ref(plan["merge_ref"], refuse_before_push)
+        lease_arg = f"--force-with-lease={merge_arg}:{safe_ref(args.expect_remote)}"
+        remote_arg = safe_token(str(plan["remote"]), "remote", refuse_before_push)
+        record_push(args, plan, status="attempted")
+        git(repo, "push", lease_arg, remote_arg, f"HEAD:{merge_arg}", check=True)
         sha = current_short_sha(repo)
-        record_push(args, plan, sha)
+        record_push(args, plan, status="pushed", sha=sha)
         emit({**plan, "pushed": True, "forced": True})
         return 0
 
@@ -1090,6 +1193,11 @@ def cmd_facts(args: argparse.Namespace) -> int:
         # Appended through the tool so the rest of the file is never rewritten by
         # hand -- a hand-merge is how computed fields get dropped.
         append_notes(facts, args.note)
+    if args.requested_action:
+        # The one thing no command can read off the repository: the user's
+        # answer. Everything below derives what *happened*; this is what was
+        # *asked*, and the two are allowed to differ.
+        facts["requested_action"] = args.requested_action
     facts.setdefault("scan", {})["git_repo"] = is_repo(repo)
     commit = facts.setdefault("commit", {})
     if args.choice:
@@ -1125,6 +1233,13 @@ def cmd_facts(args: argparse.Namespace) -> int:
     # commit at all is "not committed", which is equally true of a refusal and
     # of the user declining. Nothing here can disagree with the rest of the
     # document, because it is computed from the rest of the document.
+    #
+    # This is the *outcome*, and it stays the outcome. A push that was attempted
+    # and failed leaves `push.status` behind without a sha, so it lands here as
+    # "commit only" -- correct, and no longer the whole story, because
+    # `requested_action` records that a push was wanted and render_summary shows
+    # both. The sha is the discriminator rather than the status because only the
+    # success leg can produce one.
     if not commit.get("choice"):
         if not commit.get("hash"):
             commit["choice"] = "not committed"
@@ -1195,6 +1310,11 @@ def main() -> int:
         help="append a free-form note (repeatable); the only prose field",
     )
     p.add_argument("--hash", help="the commit this run produced (verified, not trusted)")
+    p.add_argument(
+        "--requested-action",
+        choices=("commit + push", "commit only", "not committed"),
+        help="what the user asked for, recorded separately from what happened",
+    )
     p.add_argument(
         "--choice",
         choices=("commit + push", "commit only", "not committed"),

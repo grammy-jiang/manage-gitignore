@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import re
+from typing import ClassVar
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -190,6 +191,9 @@ class TestTheSummaryCannotBeForged:
     # or from a recommendation's `reason` changed no test at all.
     EXTERNAL_PATHS: tuple[str, ...] = (
         "title",
+        # Renders only when it differs from `commit.choice`, which every poison
+        # value here does -- so it reaches the output on its own, with no gate.
+        "requested_action",
         "notes[]",
         "scan.detected[]",
         "scan.prev_templates_count",
@@ -354,3 +358,74 @@ class TestTheSummaryCannotBeForged:
             ]
 
         assert value_offsets(poisoned) == value_offsets(benign)
+
+
+class TestAFailedPushCannotBeForgedEither:
+    """The same grid, on the other document shape.
+
+    `commit.push.status` and `.reason` exist only in a run whose push did *not*
+    land -- a successful push has a sha, and the sha branch renders instead. So
+    they cannot be reached from FULL_FACTS, which is a successful run, and a
+    path added to the list above would fail
+    `test_every_field_in_that_list_actually_reaches_the_output` rather than
+    check anything. Two shapes, two fixtures, one guarantee.
+
+    `reason` matters most: it is the only one of the two that is a sentence, and
+    it is composed from the plan -- including a remote name the repository
+    supplies and a `--remote` value the caller does.
+    """
+
+    BASE: ClassVar[dict] = {
+        "requested_action": "commit + push",
+        "commit": {
+            "choice": "commit only",
+            "hash": "726bc13",
+            "push": {"status": "not attempted", "remote": "origin", "branch": "main"},
+        },
+    }
+    # `reason` is displayed. `status` is only ever compared against a literal,
+    # so it must reach the output *nowhere* -- both are checked below, because
+    # "it is only a discriminator" is a claim about today's renderer.
+    DISPLAYED = ("reason",)
+    PATHS = ("status", "reason")
+
+    @classmethod
+    def _with(cls, key: str, value: object):
+        base = copy.deepcopy(cls.BASE)
+        base["commit"]["push"][key] = value
+        return base
+
+    @staticmethod
+    def _rendered(facts):
+        return summary.render(facts, summary.Pal(False))
+
+    def test_every_displayed_field_here_actually_reaches_the_output(self):
+        marker = "MARKER" + "VALUE"
+        missing = [
+            key for key in self.DISPLAYED if marker not in self._rendered(self._with(key, marker))
+        ]
+        assert missing == []
+
+    def test_the_status_is_a_discriminator_and_never_reaches_the_output(self):
+        marker = "MARKER" + "VALUE"
+        assert marker not in self._rendered(self._with("status", marker))
+
+    def test_no_field_of_a_failed_push_can_forge_anything(self):
+        failures = []
+        for key in self.PATHS:
+            baseline = len(self._rendered(self._with(key, "ordinary")).splitlines())
+            for char in MUST_NOT_SURVIVE:
+                rendered = self._rendered(self._with(key, f"before{char}after"))
+                if len(rendered.splitlines()) != baseline or any(
+                    shared.SUSPICIOUS_CHARS.search(line) for line in rendered.splitlines()
+                ):
+                    failures.append(f"commit.push.{key} U+{ord(char):04X}")
+        assert not failures, f"{len(failures)} forged: {failures[:10]}"
+
+    @PROPERTY
+    @given(field=st.sampled_from(PATHS), value=POISONED)
+    def test_no_field_of_a_failed_push_can_forge_a_line_in_ordinary_text(self, field, value):
+        baseline = self._rendered(self._with(field, "ordinary"))
+        assert len(self._rendered(self._with(field, value)).splitlines()) == len(
+            baseline.splitlines()
+        )

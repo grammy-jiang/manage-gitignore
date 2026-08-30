@@ -265,11 +265,18 @@ class WriteFacts(TypedDict, total=False):
 
 
 class PushFacts(TypedDict, total=False):
-    """Where a push landed, in pieces. render_summary composes the display."""
+    """How far a push got, in pieces. render_summary composes the display.
 
+    `status` is the outcome: `pushed` (sha is set), `attempted` (git ran and did
+    not return), or `not attempted` (the plan refused, and `reason` says which
+    refusal). One home for all three, so nothing can hold two answers at once.
+    """
+
+    status: str  # pushed | attempted | not attempted
     sha: str
     remote: str
     branch: str
+    reason: str  # why a push was not attempted; from the plan, never free text
 
 
 class CommitFacts(TypedDict, total=False):
@@ -354,6 +361,10 @@ FACTS_TOOL = "manage-gitignore"
 
 class Facts(TypedDict, total=False):
     tool: str
+    # What the user asked for. Every other field records what happened; without
+    # this one an outcome overwrites the intent, and a push that failed reads as
+    # a run where no push was ever wanted.
+    requested_action: str  # commit + push | commit only | not committed
     scan: ScanFacts
     templates: TemplatesFacts
     merge: MergeFacts

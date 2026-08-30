@@ -20,6 +20,7 @@ bug worth surfacing, not one to paper over.
 FACTS schema (all fields optional; sections with no data are skipped):
 {
   "title": "manage-gitignore - run summary",
+  "requested_action": "commit + push",
   "scan":   {"git_repo": true, "gitignore": "existing|none",
              "prev_templates_count": 11, "custom_lines": 0,
              "detected": ["node (scripts/lint-mermaid.mjs)"]},
@@ -36,7 +37,9 @@ FACTS schema (all fields optional; sections with no data are skipped):
   "commit": {"choice": "commit + push|commit only|not committed",
              "hash": "6e0a827", "subject": "chore: ...",
              "scope": ".gitignore only", "untouched": "4 staged files",
-             "push": {"sha": "6e0a827", "remote": "origin", "branch": "main"}},
+             "push": {"status": "pushed|attempted|not attempted",
+                      "sha": "6e0a827", "remote": "origin", "branch": "main",
+                      "reason": "branch has diverged"}},
   "net":    {"prev_count": 11, "new_count": 12,
              "diffstat": "1 file changed, 7 insertions(+), 3 deletions(-)"},
   "notes":  ["free-form context shown near the top, e.g. a pre-run history reset"]
@@ -309,7 +312,18 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
         # One default, used by both the row and the push gate below: two
         # fallbacks drifting apart produced a self-contradictory summary.
         choice = clean(commit.get("choice", "not committed"))
-        rows = [("choice", choice)]
+        # What was asked, when it is not what happened. Shown only on a
+        # mismatch: on an ordinary run it would restate the row below it.
+        # Without it, a push that failed came out as a bare "commit only" --
+        # the outcome overwriting the intent, with nothing left to say a push
+        # had ever been wanted.
+        requested = clean(facts.get("requested_action", ""))
+        # Not `diverged`: this file's neighbours use that word for a branch that
+        # needs a force-push, and reusing it for "the ask and the outcome
+        # disagree" reads as the other concept.
+        requested_differs = bool(requested) and requested != choice
+        rows = [("requested", requested)] if requested_differs else []
+        rows.append(("choice", choice))
         if commit.get("hash"):
             subj = clean(commit.get("subject", ""))
             rows.append(("commit", f"{pal.hashc(clean(commit['hash']))}  {subj}"))
@@ -320,15 +334,30 @@ def render(facts: Facts | Mapping[str, Any], pal: Pal) -> str:
                 scope += f"  {pal.dim(f'({clean(untouched)} untouched)')}"
             rows.append(("scope", scope))
         # Only meaningful once something was committed: "not pushed" under
-        # choice "not committed" reads as a failure rather than a non-event.
-        if choice != "not committed":
-            push = commit.get("push")
-            if push:
+        # choice "not committed" reads as a failure rather than a non-event --
+        # unless a push was asked for, and then its absence is the news.
+        #
+        # Gated on the ask itself, not on `requested_differs`: a "commit only"
+        # run whose commit was refused also has an ask that differs from its
+        # outcome, and reporting "not pushed" there invents a push nobody
+        # wanted. There is only something to say about a push when one was asked
+        # for.
+        wanted_push = requested == "commit + push"
+        if choice != "not committed" or wanted_push:
+            push = commit.get("push") or {}
+            if push.get("sha"):
                 where = f"{clean(push.get('remote', ''))}/{clean(push.get('branch', ''))}"
                 pushed = f"{pal.hashc(clean(push.get('sha', '')))} \u2192 {where}"
             else:
-                pushed = pal.dim("not pushed")
-                if notes:
+                # `attempted` means git ran and did not come back: the error text
+                # is the agent's to carry into NOTES, so this row says only that
+                # it failed. `not attempted` carries the plan's own reason.
+                status = clean(push.get("status", ""))
+                reason = clean(push.get("reason", ""))
+                pushed = pal.dim("push failed" if status == "attempted" else "not pushed")
+                if reason:
+                    pushed += pal.dim(f" — {reason}")
+                elif notes:
                     # The explanation lives in NOTES; point at it from the row
                     # it explains rather than leaving the reader to connect them.
                     pushed += pal.dim(" — see NOTES")

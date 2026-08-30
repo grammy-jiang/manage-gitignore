@@ -258,11 +258,17 @@ class TestRecordedPushKeepsTheWholeBranchName:
         gitwork.record_push(
             args,
             {"merge_ref": "refs/heads/feature/foo", "remote": "origin"},
-            "abc1234",
+            status="pushed",
+            sha="abc1234",
         )
 
         push = json.loads(facts.read_text(encoding="utf-8"))["commit"]["push"]
-        assert push == {"sha": "abc1234", "remote": "origin", "branch": "feature/foo"}
+        assert push == {
+            "status": "pushed",
+            "sha": "abc1234",
+            "remote": "origin",
+            "branch": "feature/foo",
+        }
 
 
 class TestGapsFoundByMutationAudit:
